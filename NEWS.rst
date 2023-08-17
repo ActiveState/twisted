@@ -3,6 +3,62 @@ http://twistedmatrix.com/trac/ticket/<number>
 
 .. towncrier release notes start
 
+Twisted 20.3.0.1 (2023-08-17)
+===========================
+
+Bugfixes
+--------
+
+- twisted.conch.ssh.transport.SSHTransportBase now disconnects the remote peer if the
+  SSH version string is not sent in the first 4096 bytes. (#10284, CVE-2022-21716,
+  GHSA-rv6r-3f5q-9rgx)
+
+
+Improved Documentation
+----------------------
+
+Deprecations and Removals
+-------------------------
+
+Misc
+----
+
+Conch
+-----
+
+Features
+~~~~~~~~
+
+Bugfixes
+~~~~~~~~
+
+Misc
+~~~~
+
+Web
+---
+
+Bugfixes
+~~~~~~~~
+
+Mail
+----
+
+Misc
+~~~~
+
+Words
+-----
+
+Bugfixes
+~~~~~~~~
+
+Names
+-----
+
+Bugfixes
+~~~~~~~~
+
 Twisted 20.3.0 (2020-03-13)
 ===========================
 
