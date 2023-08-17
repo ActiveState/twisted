@@ -680,7 +680,6 @@ class SSHTransportBase(protocol.Protocol):
         self.sendDisconnect(DISCONNECT_PROTOCOL_VERSION_NOT_SUPPORTED,
             b'bad version ' + remoteVersion)
 
-
     def dataReceived(self, data):
         """
         First, check for the version string (SSH-2.0-*).  After that has been
@@ -692,32 +691,40 @@ class SSHTransportBase(protocol.Protocol):
         """
         self.buf = self.buf + data
         if not self.gotVersion:
-            if self.buf.find(b'\n', self.buf.find(b'SSH-')) == -1:
+
+            if len(self.buf) > 4096:
+                self.sendDisconnect(
+                    DISCONNECT_CONNECTION_LOST,
+                    b"Peer version string longer than 4KB. "
+                    b"Preventing a denial of service attack.",
+                )
+                return
+
+            if self.buf.find(b"\n", self.buf.find(b"SSH-")) == -1:
                 return
 
             # RFC 4253 section 4.2 ask for strict `\r\n` line ending.
             # Here we are a bit more relaxed and accept implementations ending
             # only in '\n'.
             # https://tools.ietf.org/html/rfc4253#section-4.2
-            lines = self.buf.split(b'\n')
+            lines = self.buf.split(b"\n")
             for p in lines:
-                if p.startswith(b'SSH-'):
+                if p.startswith(b"SSH-"):
                     self.gotVersion = True
                     # Since the line was split on '\n' and most of the time
                     # it uses '\r\n' we may get an extra '\r'.
-                    self.otherVersionString = p.rstrip(b'\r')
-                    remoteVersion = p.split(b'-')[1]
+                    self.otherVersionString = p.rstrip(b"\r")
+                    remoteVersion = p.split(b"-")[1]
                     if remoteVersion not in self.supportedVersions:
                         self._unsupportedVersionReceived(remoteVersion)
                         return
                     i = lines.index(p)
-                    self.buf = b'\n'.join(lines[i + 1:])
+                    self.buf = b"\n".join(lines[i + 1 :])
         packet = self.getPacket()
         while packet:
             messageNum = ord(packet[0:1])
             self.dispatchMessage(messageNum, packet[1:])
             packet = self.getPacket()
-
 
     def dispatchMessage(self, messageNum, payload):
         """
