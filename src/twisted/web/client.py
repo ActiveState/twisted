@@ -1504,6 +1504,14 @@ class ContentDecoderAgent(object):
         return response
 
 
+_canonicalHeaderName = Headers()._canonicalNameCaps
+_defaultSensitiveHeaders = frozenset([
+    b"Authorization",
+    b"Cookie",
+    b"Cookie2",
+    b"Proxy-Authorization",
+    b"WWW-Authenticate",
+])
 
 @implementer(IAgent)
 class RedirectAgent(object):
@@ -1519,6 +1527,11 @@ class RedirectAgent(object):
     @param redirectLimit: The maximum number of times the agent is allowed to
         follow redirects before failing with a L{error.InfiniteRedirection}.
 
+    @param sensitiveHeaderNames: An iterable of C{bytes} enumerating the names
+        of headers that must not be transmitted when redirecting to a different
+        origins.  These will be consulted in addition to the protocol-specified
+        set of headers that contain sensitive information.
+
     @cvar _redirectResponses: A L{list} of HTTP status codes to be redirected
         for I{GET} and I{HEAD} methods.
 
@@ -1532,10 +1545,17 @@ class RedirectAgent(object):
                           http.TEMPORARY_REDIRECT]
     _seeOtherResponses = [http.SEE_OTHER]
 
-
-    def __init__(self, agent, redirectLimit=20):
+    def __init__(
+        self,
+        agent: IAgent,
+        redirectLimit: int = 20,
+        sensitiveHeaderNames = (),
+    ):
         self._agent = agent
         self._redirectLimit = redirectLimit
+        sensitive = set(_canonicalHeaderName(each) for each in sensitiveHeaderNames)
+        sensitive.update(_defaultSensitiveHeaders)
+        self._sensitiveHeaderNames = sensitive
 
 
     def request(self, method, uri, headers=None, bodyProducer=None):
@@ -1582,6 +1602,22 @@ class RedirectAgent(object):
                 response.code, b'No location header field', uri)
             raise ResponseFailed([Failure(err)], response)
         location = self._resolveLocation(uri, locationHeaders[0])
+        if headers:
+            parsedURI = URI.fromBytes(uri)
+            parsedLocation = URI.fromBytes(location)
+            sameOrigin = (
+                (parsedURI.scheme == parsedLocation.scheme)
+                and (parsedURI.host == parsedLocation.host)
+                and (parsedURI.port == parsedLocation.port)
+            )
+            if not sameOrigin:
+                headers = Headers(
+                    {
+                        rawName: rawValue
+                        for rawName, rawValue in headers.getAllRawHeaders()
+                        if rawName not in self._sensitiveHeaderNames
+                    }
+                )
         deferred = self._agent.request(method, location, headers)
         def _chainResponse(newResponse):
             newResponse.setPreviousResponse(response)
