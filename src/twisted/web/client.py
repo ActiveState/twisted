@@ -1547,8 +1547,8 @@ class RedirectAgent(object):
 
     def __init__(
         self,
-        agent: IAgent,
-        redirectLimit: int = 20,
+        agent,
+        redirectLimit= 20,
         sensitiveHeaderNames = (),
     ):
         self._agent = agent
