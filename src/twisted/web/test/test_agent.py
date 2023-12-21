@@ -2651,8 +2651,14 @@ class _RedirectAgentTestsMixin(object):
         self.assertIdentical(response, result)
         self.assertIdentical(result.previousResponse, None)
 
-
-    def _testRedirectDefault(self, code):
+    def _testRedirectDefault(
+        self,
+        code,
+        crossScheme = False,
+        crossDomain = False,
+        crossPort = False,
+        requestHeaders = None,
+    ):
         """
         When getting a redirect, L{client.RedirectAgent} follows the URL
         specified in the L{Location} header field and make a new request.
@@ -2677,9 +2683,28 @@ class _RedirectAgentTestsMixin(object):
             scheme = b'https'
             expectedPort = 443
 
+        targetScheme = startScheme
+        targetDomain = startDomain
+        targetPort = startPort
+
+        if crossScheme:
+            if ssl is None:
+                raise SkipTest(
+                    "Cross-scheme redirects can't be tested without TLS support."
+                )
+            targetScheme = b"https" if startScheme == b"http" else b"http"
+            targetPort = 443 if startPort == 80 else 80
+
+        portSyntax = b''
+        if crossPort:
+            targetPort = 8443
+            portSyntax = b':8443'
+        targetDomain = b"example.net" if crossDomain else startDomain
+        locationValue = targetScheme + b"://" + targetDomain + portSyntax + b"/bar"
         headers = http_headers.Headers(
-            {b'location': [scheme + b'://example.com/bar']})
-        response = Response((b'HTTP', 1, 1), code, b'OK', headers, None)
+            {b"location": [locationValue]}
+        )
+        response = Response((b"HTTP", 1, 1), code, b"OK", headers, None)
         res.callback(response)
 
         req2, res2 = self.protocol.requests.pop()
@@ -2711,6 +2736,77 @@ class _RedirectAgentTestsMixin(object):
         """
         self._testRedirectDefault(307)
 
+
+    def _sensitiveHeadersTest(self, expectedHostHeader = b"example.com", **crossKwargs):
+        """
+        L{client.RedirectAgent} scrubs sensitive headers when redirecting
+        between differing origins.
+        """
+        sensitiveHeaderValues = {
+            b"authorization": [b"sensitive-authnz"],
+            b"cookie": [b"sensitive-cookie-data"],
+            b"cookie2": [b"sensitive-cookie2-data"],
+            b"proxy-authorization": [b"sensitive-proxy-auth"],
+            b"wWw-auThentiCate": [b"sensitive-authn"],
+            b"x-custom-sensitive": [b"sensitive-custom"],
+        }
+        otherHeaderValues = {b"x-random-header": [b"x-random-value"]}
+        # allHeaders = Headers({**sensitiveHeaderValues, **otherHeaderValues})
+        allHeadersDict={}
+        allHeadersDict.update(sensitiveHeaderValues)
+        allHeadersDict.update(otherHeaderValues)
+        allHeaders = Headers(allHeadersDict)
+        redirected = self._testRedirectDefault(301, requestHeaders=allHeaders)
+
+        def normHeaders(headers):
+            return {k.lower(): v for (k, v) in headers.getAllRawHeaders()}
+
+        sameOriginHeaders = normHeaders(redirected.headers)
+        testHeaders = { b"host": [b"example.com"]}
+        testHeaders.update( normHeaders(allHeaders))
+
+        self.assertEquals(
+            sameOriginHeaders,
+            testHeaders
+        )
+
+        allHeadersDict={}
+        allHeadersDict.update(sensitiveHeaderValues)
+        allHeadersDict.update(otherHeaderValues)
+        allHeaders = Headers(allHeadersDict)
+        redirectedElsewhere = self._testRedirectDefault(
+            301,
+            crossKwargs.copy(),
+            requestHeaders=allHeadersDict,
+        )
+        otherOriginHeaders = normHeaders(redirectedElsewhere.headers)
+        testHeaders = { b"host": [expectedHostHeader] }
+        testHeaders.update( normHeaders(Headers(otherHeaderValues)))
+        self.assertEquals(
+            otherOriginHeaders,
+            testHeaders
+        )
+
+    def test_crossDomainHeaders(self):
+        """
+        L{client.RedirectAgent} scrubs sensitive headers when redirecting
+        between differing domains.
+        """
+        self._sensitiveHeadersTest(crossDomain=True, expectedHostHeader=b'example.net')
+
+    def test_crossPortHeaders(self):
+        """
+        L{client.RedirectAgent} scrubs sensitive headers when redirecting
+        between differing ports.
+        """
+        self._sensitiveHeadersTest(crossPort=True, expectedHostHeader=b'example.com:8443')
+
+    def test_crossSchemeHeaders(self):
+        """
+        L{client.RedirectAgent} scrubs sensitive headers when redirecting
+        between differing schemes.
+        """
+        self._sensitiveHeadersTest(crossScheme=True)
 
     def _testRedirectToGet(self, code, method):
         """
@@ -2937,7 +3033,9 @@ class RedirectAgentTests(TestCase, FakeReactorAndConnectMixin,
         @return: a new L{twisted.web.client.RedirectAgent}
         """
         return client.RedirectAgent(
-            self.buildAgentForWrapperTest(self.reactor))
+            self.buildAgentForWrapperTest(self.reactor),
+            sensitiveHeaderNames=[b"X-Custom-sensitive"],
+        )
 
 
     def setUp(self):
@@ -2976,7 +3074,9 @@ class BrowserLikeRedirectAgentTests(TestCase,
         @return: a new L{twisted.web.client.BrowserLikeRedirectAgent}
         """
         return client.BrowserLikeRedirectAgent(
-            self.buildAgentForWrapperTest(self.reactor))
+            self.buildAgentForWrapperTest(self.reactor),
+            sensitiveHeaderNames=[b"x-Custom-sensitive"],
+        )
 
 
     def setUp(self):
