@@ -1805,6 +1805,8 @@ class _IdentityTransferDecoder(object):
             raise _DataLoss()
 
 
+maxChunkSizeLineLength = 1024
+
 
 _chunkExtChars = (
     b"\t !\"#$%&'()*+,-./0123456789:;<=>?@"
@@ -1849,8 +1851,8 @@ don't contain characters outside this range.
 
 class _ChunkedTransferDecoder(object):
     """
-    Protocol for decoding I{chunked} Transfer-Encoding, as defined by RFC 2616,
-    section 3.6.1.  This protocol can interpret the contents of a request or
+    Protocol for decoding I{chunked} Transfer-Encoding, as defined by RFC 7230,
+    section 4.1.  This protocol can interpret the contents of a request or
     response body which uses the I{chunked} Transfer-Encoding.  It cannot
     interpret any of the rest of the HTTP protocol.
 
@@ -1866,7 +1868,7 @@ class _ChunkedTransferDecoder(object):
     noticed. -exarkun
 
     @ivar dataCallback: A one-argument callable which will be invoked each
-        time application data is received.
+        time application data is received. This callback is not reentrant.
 
     @ivar finishCallback: A one-argument callable which will be invoked when
         the terminal chunk is received.  It will be invoked with all bytes
@@ -1884,42 +1886,58 @@ class _ChunkedTransferDecoder(object):
         read. For C{'BODY'}, the contents of a chunk are being read. For
         C{'FINISHED'}, the last chunk has been completely read and no more
         input is valid.
-    """
-    state = 'CHUNK_LENGTH'
 
-    def __init__(self, dataCallback, finishCallback):
+    @ivar _buffer: Accumulated received data for the current state. At each
+        state transition this is truncated at the front so that index 0 is
+        where the next state shall begin.
+
+    @ivar _start: While in the C{'CHUNK_LENGTH'} state, tracks the index into
+        the buffer at which search for CRLF should resume. Resuming the search
+        at this position avoids doing quadratic work if the chunk length line
+        arrives over many calls to C{dataReceived}.
+
+        Not used in any other state.
+    """
+
+    state = "CHUNK_LENGTH"
+
+    def __init__(
+        self,
+        dataCallback,
+        finishCallback,
+    ):
         self.dataCallback = dataCallback
         self.finishCallback = finishCallback
-        self._buffer = b''
+        self._buffer = bytearray()
+        self._start = 0
 
+    def _dataReceived_CHUNK_LENGTH(self):
+        """
+        Read the chunk size line, ignoring any extensions.
 
-    def _dataReceived_CHUNK_LENGTH(self, data):
-        if b'\r\n' in data:
-            line, rest = data.split(b'\r\n', 1)
-            parts = line.split(b';')
-            try:
-                self.length = int(parts[0], 16)
-            except ValueError:
-                raise _MalformedChunkedDataError(
-                    "Chunk-size must be an integer.")
-            if self.length == 0:
-                self.state = 'TRAILER'
-            else:
-                self.state = 'BODY'
-            return rest
-        else:
-            self._buffer = data
-            return b''
+        @returns: C{True} once the line has been read and removed from
+            C{self._buffer}.  C{False} when more data is required.
 
+        @raises _MalformedChunkedDataError: when the chunk size cannot be
+            decoded or the length of the line exceeds L{maxChunkSizeLineLength}.
+        """
+        eolIndex = self._buffer.find(b"\r\n", self._start)
 
-    def _dataReceived_CRLF(self, data):
-        if data.startswith(b'\r\n'):
-            self.state = 'CHUNK_LENGTH'
-            return data[2:]
-        else:
-            self._buffer = data
-            return b''
+        if eolIndex >= maxChunkSizeLineLength or (
+            eolIndex == -1 and len(self._buffer) > maxChunkSizeLineLength
+        ):
+            raise _MalformedChunkedDataError(
+                "Chunk size line exceeds maximum of {} bytes.".format(
+                    maxChunkSizeLineLength
+                )
+            )
 
+        if eolIndex == -1:
+            # Restart the search upon receipt of more data at the start of the
+            # new data, minus one in case the last character of the buffer is
+            # CR.
+            self._start = len(self._buffer) - 1
+            return False
 
         endOfLengthIndex = self._buffer.find(b";", 0, eolIndex)
         if endOfLengthIndex == -1:
@@ -1939,48 +1957,107 @@ class _ChunkedTransferDecoder(object):
         if length == 0:
             self.state = "TRAILER"
         else:
-            self._buffer = data
-        return b''
+            self.state = "BODY"
 
+        self.length = length
+        del self._buffer[0 : eolIndex + 2]
+        self._start = 0
+        return True
 
-    def _dataReceived_BODY(self, data):
-        if len(data) >= self.length:
-            chunk, data = data[:self.length], data[self.length:]
+    def _dataReceived_CRLF(self):
+        """
+        Await the carriage return and line feed characters that are the end of
+        chunk marker that follow the chunk data.
+
+        @returns: C{True} when the CRLF have been read, otherwise C{False}.
+
+        @raises _MalformedChunkedDataError: when anything other than CRLF are
+            received.
+        """
+        if len(self._buffer) < 2:
+            return False
+
+        if not self._buffer.startswith(b"\r\n"):
+            raise _MalformedChunkedDataError("Chunk did not end with CRLF")
+
+        self.state = "CHUNK_LENGTH"
+        del self._buffer[0:2]
+        return True
+
+    def _dataReceived_TRAILER(self):
+        """
+        Await the carriage return and line feed characters that follow the
+        terminal zero-length chunk. Then invoke C{finishCallback} and switch to
+        state C{'FINISHED'}.
+
+        @returns: C{False}, as there is either insufficient data to continue,
+            or no data remains.
+
+        @raises _MalformedChunkedDataError: when anything other than CRLF is
+            received.
+        """
+        if len(self._buffer) < 2:
+            return False
+
+        if not self._buffer.startswith(b"\r\n"):
+            raise _MalformedChunkedDataError("Chunk did not end with CRLF")
+
+        data = memoryview(self._buffer)[2:].tobytes()
+        del self._buffer[:]
+        self.state = "FINISHED"
+        self.finishCallback(data)
+        return False
+
+    def _dataReceived_BODY(self):
+        """
+        Deliver any available chunk data to the C{dataCallback}. When all the
+        remaining data for the chunk arrives, switch to state C{'CRLF'}.
+
+        @returns: C{True} to continue processing of any buffered data.
+        """
+        if len(self._buffer) >= self.length:
+            chunk = memoryview(self._buffer)[: self.length].tobytes()
+            del self._buffer[: self.length]
+            self.state = "CRLF"
             self.dataCallback(chunk)
-            self.state = 'CRLF'
-            return data
-        elif len(data) < self.length:
-            self.length -= len(data)
-            self.dataCallback(data)
-            return b''
+        else:
+            chunk = bytes(self._buffer)
+            self.length -= len(chunk)
+            del self._buffer[:]
+            self.dataCallback(chunk)
+        return True
 
-
-    def _dataReceived_FINISHED(self, data):
+    def _dataReceived_FINISHED(self):
+        """
+        Once C{finishCallback} has been invoked receipt of additional data
+        raises L{RuntimeError} because it represents a programming error in
+        the caller.
+        """
         raise RuntimeError(
             "_ChunkedTransferDecoder.dataReceived called after last "
-            "chunk was processed")
-
+            "chunk was processed"
+        )
 
     def dataReceived(self, data):
         """
         Interpret data from a request or response body which uses the
         I{chunked} Transfer-Encoding.
         """
-        data = self._buffer + data
-        self._buffer = b''
-        while data:
-            data = getattr(self, '_dataReceived_%s' % (self.state,))(data)
-
+        self._buffer += data
+        goOn = True
+        while goOn and self._buffer:
+            goOn = getattr(self, "_dataReceived_" + self.state)()
 
     def noMoreData(self):
         """
         Verify that all data has been received.  If it has not been, raise
         L{_DataLoss}.
         """
-        if self.state != 'FINISHED':
+        if self.state != "FINISHED":
             raise _DataLoss(
                 "Chunked decoder in %r state, still expecting more data to "
-                "get to 'FINISHED' state." % (self.state,))
+                "get to 'FINISHED' state." % (self.state,)
+            )
 
 
 
