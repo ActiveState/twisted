@@ -348,8 +348,9 @@ def _ishexdigits(b):
     It must be composed of one or more characters in the ranges a-f, A-F
     and 0-9.
     """
+    testArray = bytearray("0123456789abcdefABCDEF", "utf-8")
     for c in b:
-        if c not in b"0123456789abcdefABCDEF":
+        if c not in testArray:
             return False
     return b != b""
 
