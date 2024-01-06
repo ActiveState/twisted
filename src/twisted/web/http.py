@@ -365,7 +365,8 @@ def _hexint(b):
     """
     if not _ishexdigits(b):
         raise ValueError(b)
-    return int(b, 16)
+    hexstring = b.decode("utf-8")
+    return int(hexstring, 16)
 
 
 def fromChunk(data):
