@@ -333,36 +333,48 @@ class Request(Copyable, http.Request, components.Componentized):
             if self.method in (supportedMethods):
                 # We MUST include an Allow header
                 # (RFC 2616, 10.4.6 and 14.7)
-                self.setHeader(b'Allow', b', '.join(allowedMethods))
-                s = ('''Your browser approached me (at %(URI)s) with'''
-                     ''' the method "%(method)s".  I only allow'''
-                     ''' the method%(plural)s %(allowed)s here.''' % {
-                         'URI': escape(nativeString(self.uri)),
-                         'method': nativeString(self.method),
-                         'plural': ((len(allowedMethods) > 1) and 's') or '',
-                         'allowed': ', '.join(
-                            [nativeString(x) for x in allowedMethods])
-                     })
-                epage = resource.ErrorPage(http.NOT_ALLOWED,
-                                           "Method Not Allowed", s)
+                self.setHeader(b"Allow", b", ".join(allowedMethods))
+                s = (
+                    """Your browser approached me (at %(URI)s) with"""
+                    """ the method "%(method)s".  I only allow"""
+                    """ the method%(plural)s %(allowed)s here."""
+                    % {
+                        "URI": escape(nativeString(self.uri)),
+                        "method": nativeString(self.method),
+                        "plural": ((len(allowedMethods) > 1) and "s") or "",
+                        "allowed": ", ".join([nativeString(x) for x in allowedMethods]),
+                    }
+                )
+                epage = resource._UnsafeErrorPage(
+                    http.NOT_ALLOWED, "Method Not Allowed", s
+                )
                 body = epage.render(self)
             else:
-                epage = resource.ErrorPage(
-                    http.NOT_IMPLEMENTED, "Huh?",
-                    "I don't know how to treat a %s request." %
-                    (escape(self.method.decode("charmap")),))
+                epage = resource._UnsafeErrorPage(
+                    http.NOT_IMPLEMENTED,
+                    "Huh?",
+                    "I don't know how to treat a %s request."
+                    % (escape(self.method.decode("charmap")),),
+                )
                 body = epage.render(self)
         # end except UnsupportedMethod
 
         if body is NOT_DONE_YET:
             return
         if not isinstance(body, bytes):
-            body = resource.ErrorPage(
+            body = resource._UnsafeErrorPage(
                 http.INTERNAL_SERVER_ERROR,
                 "Request did not return bytes",
-                "Request: " + util._PRE(reflect.safe_repr(self)) + "<br />" +
-                "Resource: " + util._PRE(reflect.safe_repr(resrc)) + "<br />" +
-                "Value: " + util._PRE(reflect.safe_repr(body))).render(self)
+                "Request: "
+                # GHSA-vg46-2rrj-3647 note: _PRE does HTML-escape the input.
+                + util._PRE(reflect.safe_repr(self))
+                + "<br />"
+                + "Resource: "
+                + util._PRE(reflect.safe_repr(resrc))
+                + "<br />"
+                + "Value: "
+                + util._PRE(reflect.safe_repr(body)),
+            ).render(self)
 
         if self.method == b"HEAD":
             if len(body) > 0:
@@ -624,7 +636,8 @@ class GzipEncoderFactory(object):
 
     @since: 12.3
     """
-    _gzipCheckRegex = re.compile(br'(:?^|[\s,])gzip(:?$|[\s,])')
+
+    _gzipCheckRegex = re.compile(rb"(:?^|[\s,])gzip(:?$|[\s,])")
     compressLevel = 9
 
     def encoderForRequest(self, request):

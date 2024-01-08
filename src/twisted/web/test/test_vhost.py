@@ -68,9 +68,8 @@ class NameVirtualHostTests(TestCase):
         """
         virtualHostResource = NameVirtualHost()
         virtualHostResource.default = Data(b"correct result", "")
-        request = DummyRequest([''])
-        self.assertEqual(
-            virtualHostResource.render(request), b"correct result")
+        request = DummyRequest([b""])
+        self.assertEqual(virtualHostResource.render(request), b"correct result")
 
 
     def test_renderWithoutHostNoDefault(self):
@@ -80,7 +79,7 @@ class NameVirtualHostTests(TestCase):
         header in the request.
         """
         virtualHostResource = NameVirtualHost()
-        request = DummyRequest([''])
+        request = DummyRequest([b""])
         d = _render(virtualHostResource, request)
         def cbRendered(ignored):
             self.assertEqual(request.responseCode, NOT_FOUND)
@@ -139,14 +138,26 @@ class NameVirtualHostTests(TestCase):
         matching the value of the I{Host} header in the request.
         """
         virtualHostResource = NameVirtualHost()
-        request = DummyRequest([''])
-        request.requestHeaders.addRawHeader(b'host', b'example.com')
+        request = DummyRequest([b""])
+        request.requestHeaders.addRawHeader(b"host", b"example.com")
         d = _render(virtualHostResource, request)
         def cbRendered(ignored):
             self.assertEqual(request.responseCode, NOT_FOUND)
         d.addCallback(cbRendered)
         return d
 
+    async def test_renderWithHTMLHost(self):
+        """
+        L{NameVirtualHost.render} doesn't echo unescaped HTML when present in
+        the I{Host} header.
+        """
+        virtualHostResource = NameVirtualHost()
+        request = DummyRequest([b""])
+        request.requestHeaders.addRawHeader(b"host", b"<b>example</b>.com")
+
+        await _render(virtualHostResource, request)
+
+        self.assertNotIn(b"<b>", b"".join(request.written))
 
     def test_getChild(self):
         """
