@@ -46,7 +46,8 @@ class CacheScanner:
     def recache(self):
         self.doCache = 1
 
-noRsrc = resource.ErrorPage(500, "Whoops! Internal Error", rpyNoResource)
+
+noRsrc = resource._UnsafeErrorPage(500, "Whoops! Internal Error", rpyNoResource)
 
 def ResourceScript(path, registry):
     """
@@ -74,10 +75,13 @@ def ResourceScript(path, registry):
 def ResourceTemplate(path, registry):
     from quixote import ptl_compile
 
-    glob = {'__file__': _coerceToFilesystemEncoding("", path),
-            'resource': resource.ErrorPage(500, "Whoops! Internal Error",
-                                           rpyNoResource),
-            'registry': registry}
+    glob = {
+        "__file__": _coerceToFilesystemEncoding("", path),
+        "resource": resource._UnsafeErrorPage(
+            500, "Whoops! Internal Error", rpyNoResource
+        ),
+        "registry": registry,
+    }
 
     with open(path) as f:  # Not closed by quixote as of 2.9.1
         e = ptl_compile.compile_template(f, path)
@@ -129,10 +133,10 @@ class ResourceScriptDirectory(resource.Resource):
             return ResourceScriptDirectory(fn, self.registry)
         if os.path.exists(fn):
             return ResourceScript(fn, self.registry)
-        return resource.NoResource()
+        return resource._UnsafeNoResource()
 
     def render(self, request):
-        return resource.NoResource().render(request)
+        return resource._UnsafeNoResource().render(request)
 
 
 
