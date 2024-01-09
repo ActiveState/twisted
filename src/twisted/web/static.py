@@ -39,7 +39,7 @@ if _PY3:
 else:
     from urllib import quote, unquote
 
-dangerousPathError = resource._UnsafeNoResource("Invalid request URL.")
+dangerousPathError = resource.NoResource("Invalid request URL.")
 
 def isDangerous(path):
     return path == b'..' or b'/' in path or networkString(os.sep) in path
@@ -268,8 +268,8 @@ class File(resource.Resource, filepath.FilePath):
         """
         self.ignoredExts.append(ext)
 
-    childNotFound = resource._UnsafeNoResource("File not found.")
-    forbidden = resource._UnsafeForbiddenResource()
+    childNotFound = resource.NoResource("File not found.")
+    forbidden = resource.ForbiddenResource()
 
 
     def directoryListing(self):

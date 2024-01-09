@@ -10,7 +10,7 @@ from __future__ import division, absolute_import
 
 # Twisted Imports
 from twisted.python import roots
-from twisted.web import pages, resource
+from twisted.web import resource
 
 
 class VirtualHostCollection(roots.Homogenous):
@@ -75,16 +75,15 @@ class NameVirtualHost(resource.Resource):
         del self.hosts[name]
 
     def _getResourceForRequest(self, request):
-        """(Internal) Get the appropriate resource for the given host."""
-        hostHeader = request.getHeader(b"host")
-        if hostHeader is None:
-            return self.default or pages.notFound()
+        """(Internal) Get the appropriate resource for the given host.
+        """
+        hostHeader = request.getHeader(b'host')
+        if hostHeader == None:
+            return self.default or resource.NoResource()
         else:
-            host = hostHeader.lower().split(b":", 1)[0]
-        return self.hosts.get(host, self.default) or pages.notFound(
-            "Not Found",
-            "host {} not in vhost map".format(repr(host.decode('ascii', 'replace'))),
-        )
+            host = hostHeader.lower().split(b':', 1)[0]
+        return (self.hosts.get(host, self.default)
+                or resource.NoResource("host %s not in vhost map" % repr(host)))
 
     def render(self, request):
         """Implementation of resource.Resource's render method.
