@@ -270,7 +270,7 @@ def getSetupArgs(extensions=_EXTENSIONS, readme='README.rst'):
     requirements = [
         "zope.interface >= 4.4.2",
         "constantly >= 15.1",
-        "incremental >= 16.10.1",
+        "incremental >= 16.10.1,<22.10.0",
         "Automat >= 0.3.0",
         "hyperlink >= 17.1.1",
         # PyHamcrest 1.10.0 is Python 3 only, but lacks package metadata that
@@ -283,7 +283,7 @@ def getSetupArgs(extensions=_EXTENSIONS, readme='README.rst'):
     arguments.update(dict(
         packages=find_packages("src"),
         use_incremental=True,
-        setup_requires=["incremental >= 16.10.1"],
+        setup_requires=["incremental >= 16.10.1, <22.10.0"],
         install_requires=requirements,
         entry_points={
             'console_scripts': _CONSOLE_SCRIPTS
