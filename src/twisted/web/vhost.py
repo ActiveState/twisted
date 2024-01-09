@@ -83,7 +83,7 @@ class NameVirtualHost(resource.Resource):
             host = hostHeader.lower().split(b":", 1)[0]
         return self.hosts.get(host, self.default) or pages.notFound(
             "Not Found",
-            f"host {host.decode('ascii', 'replace')!r} not in vhost map",
+            "host {} not in vhost map".format(repr(host.decode('ascii', 'replace'))),
         )
 
     def render(self, request):
