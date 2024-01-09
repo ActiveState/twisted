@@ -38,7 +38,9 @@ class _ErrorPage(Resource):
     """
 
     def __init__(self, code, brief, detail):
-        super().__init__()
+        # This is Python2, have to call the awkward way
+        # super().__init__()
+        Resource.__init__(self)
         self._code = code
         self._brief = brief
         self._detail = detail
