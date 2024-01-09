@@ -146,7 +146,7 @@ class NameVirtualHostTests(TestCase):
         d.addCallback(cbRendered)
         return d
 
-    async def test_renderWithHTMLHost(self):
+    def test_renderWithHTMLHost(self):
         """
         L{NameVirtualHost.render} doesn't echo unescaped HTML when present in
         the I{Host} header.
@@ -155,7 +155,7 @@ class NameVirtualHostTests(TestCase):
         request = DummyRequest([b""])
         request.requestHeaders.addRawHeader(b"host", b"<b>example</b>.com")
 
-        await _render(virtualHostResource, request)
+        _render(virtualHostResource, request)
 
         self.assertNotIn(b"<b>", b"".join(request.written))
 

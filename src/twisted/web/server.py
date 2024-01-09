@@ -637,7 +637,7 @@ class GzipEncoderFactory(object):
     @since: 12.3
     """
 
-    _gzipCheckRegex = re.compile(rb"(:?^|[\s,])gzip(:?$|[\s,])")
+    _gzipCheckRegex = re.compile(b"(:?^|[\\s,])gzip(:?$|[\\s,])")
     compressLevel = 9
 
     def encoderForRequest(self, request):

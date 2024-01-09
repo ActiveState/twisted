@@ -37,13 +37,13 @@ class _ErrorPage(Resource):
     @ivar _detail: A longer string which will be included in the response body.
     """
 
-    def __init__(self, code: int, brief: str, detail: str) -> None:
+    def __init__(self, code, brief, detail):
         super().__init__()
-        self._code: int = code
-        self._brief: str = brief
-        self._detail: str = detail
+        self._code = code
+        self._brief = brief
+        self._detail = detail
 
-    def render(self, request: IRequest) -> object:
+    def render(self, request):
         """
         Respond to all requests with the given HTTP status code and an HTML
         document containing the explanatory strings.
@@ -58,13 +58,13 @@ class _ErrorPage(Resource):
             cast(
                 IRenderable,
                 tags.html(
-                    tags.head(tags.title(f"{self._code} - {self._brief}")),
+                    tags.head(tags.title("{} - {}".format(self._code,self._brief))),
                     tags.body(tags.h1(self._brief), tags.p(self._detail)),
                 ),
             ),
         )
 
-    def getChild(self, path: bytes, request: IRequest) -> Resource:
+    def getChild(self, path, request):
         """
         Handle all requests for which L{_ErrorPage} lacks a child by returning
         this error page.
@@ -76,7 +76,7 @@ class _ErrorPage(Resource):
         return self
 
 
-def errorPage(code: int, brief: str, detail: str) -> IResource:
+def errorPage(code, brief, detail):
     """
     Build a resource that responds to all requests with a particular HTTP
     status code and an HTML body containing some descriptive text. This is
@@ -100,9 +100,9 @@ def errorPage(code: int, brief: str, detail: str) -> IResource:
 
 
 def notFound(
-    brief: str = "No Such Resource",
-    message: str = "Sorry. No luck finding that resource.",
-) -> IResource:
+    brief = "No Such Resource",
+    message = "Sorry. No luck finding that resource.",
+):
     """
     Generate an L{IResource} with a 404 Not Found status code.
 
@@ -118,8 +118,8 @@ def notFound(
 
 
 def forbidden(
-    brief: str = "Forbidden Resource", message: str = "Sorry, resource is forbidden."
-) -> IResource:
+    brief = "Forbidden Resource", message = "Sorry, resource is forbidden."
+):
     """
     Generate an L{IResource} with a 403 Forbidden status code.
 
