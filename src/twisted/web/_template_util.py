@@ -53,10 +53,11 @@ def _PRE(text):
     @return: Escaped text wrapped in <pre> tags.
     @rtype: C{str}
     """
-    return f"<pre>{escape(text)}</pre>"
+    # return f"<pre>{escape(text)}</pre>"
+    return "<pre>{}</pre>".format(escape(text))
 
 
-def redirectTo(URL: bytes, request: IRequest) -> bytes:
+def redirectTo(URL, request):
     """
     Generate a redirect to the given location.
 
@@ -107,7 +108,7 @@ class Redirect(resource.Resource):
 
     isLeaf = True
 
-    def __init__(self, url: bytes):
+    def __init__(self, url):
         super().__init__()
         self.url = url
 
@@ -167,7 +168,7 @@ class ParentRedirect(resource.Resource):
 
     isLeaf = 1
 
-    def render(self, request: IRequest) -> bytes:
+    def render(self, request):
         """
         Respond to all requests by redirecting to nearest directory.
         """
@@ -349,18 +350,18 @@ class _NSContext:
     A mapping from XML namespaces onto their prefixes in the document.
     """
 
-    def __init__(self, parent: Optional["_NSContext"] = None):
+    def __init__(self, parent = None):
         """
         Pull out the parent's namespaces, if there's no parent then default to
         XML.
         """
         self.parent = parent
         if parent is not None:
-            self.nss: Dict[Optional[str], Optional[str]] = OrderedDict(parent.nss)
+            self.nss = OrderedDict(parent.nss)
         else:
             self.nss = {"http://www.w3.org/XML/1998/namespace": "xml"}
 
-    def get(self, k: Optional[str], d: Optional[str] = None) -> Optional[str]:
+    def get(self, k, d = None):
         """
         Get a prefix for a namespace.
 
@@ -368,13 +369,13 @@ class _NSContext:
         """
         return self.nss.get(k, d)
 
-    def __setitem__(self, k: Optional[str], v: Optional[str]) -> None:
+    def __setitem__(self, k, v):
         """
         Proxy through to setting the prefix for the namespace.
         """
         self.nss.__setitem__(k, v)
 
-    def __getitem__(self, k: Optional[str]) -> Optional[str]:
+    def __getitem__(self, k):
         """
         Proxy through to getting the prefix for the namespace.
         """
@@ -390,7 +391,7 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
     Document Object Model.
     """
 
-    def __init__(self, sourceFilename: Optional[str]):
+    def __init__(self, sourceFilename):
         """
         @param sourceFilename: the filename the XML was loaded out of.
         """
@@ -398,35 +399,35 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
         self.prefixMap = _NSContext()
         self.inCDATA = False
 
-    def setDocumentLocator(self, locator: Locator) -> None:
+    def setDocumentLocator(self, locator):
         """
         Set the document locator, which knows about line and character numbers.
         """
         self.locator = locator
 
-    def startDocument(self) -> None:
+    def startDocument(self):
         """
         Initialise the document.
         """
         # Depending on our active context, the element type can be Tag, slot
         # or str. Since mypy doesn't understand that context, it would be
         # a pain to not use Any here.
-        self.document: List[Any] = []
+        self.document = []
         self.current = self.document
-        self.stack: List[Any] = []
-        self.xmlnsAttrs: List[Tuple[str, str]] = []
+        self.stack = []
+        self.xmlnsAttrs = []
 
-    def endDocument(self) -> None:
+    def endDocument(self):
         """
         Document ended.
         """
 
-    def processingInstruction(self, target: str, data: str) -> None:
+    def processingInstruction(self, target, data):
         """
         Processing instructions are ignored.
         """
 
-    def startPrefixMapping(self, prefix: Optional[str], uri: str) -> None:
+    def startPrefixMapping(self, prefix, uri):
         """
         Set up the prefix mapping, which maps fully qualified namespace URIs
         onto namespace prefixes.
@@ -448,7 +449,7 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
         else:
             self.xmlnsAttrs.append(("xmlns:%s" % prefix, uri))
 
-    def endPrefixMapping(self, prefix: Optional[str]) -> None:
+    def endPrefixMapping(self, prefix):
         """
         "Pops the stack" on the prefix mapping.
 
@@ -460,10 +461,10 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
 
     def startElementNS(
         self,
-        namespaceAndName: Tuple[str, str],
-        qname: Optional[str],
-        attrs: Mapping[Tuple[Optional[str], str], str],
-    ) -> None:
+        namespaceAndName,
+        qname,
+        attrs,
+    ):
         """
         Gets called when we encounter a new xmlns attribute.
 
@@ -483,7 +484,7 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
             if name == "transparent":
                 name = ""
             elif name == "slot":
-                default: Optional[str]
+                default = None
                 try:
                     # Try to get the default value for the slot
                     default = attrs[(None, "default")]
@@ -527,19 +528,19 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
             if nsPrefix is None:
                 attrKey = attrName
             else:
-                attrKey = f"{nsPrefix}:{attrName}"
+                attrKey = "{}:{}".format(nsPrefix, attrName)
             nonTemplateAttrs[attrKey] = v
 
         if ns == TEMPLATE_NAMESPACE and name == "attr":
             if not self.stack:
                 # TODO: define a better exception for this?
                 raise AssertionError(
-                    f"<{{{TEMPLATE_NAMESPACE}}}attr> as top-level element"
+                    "<{{{}}}attr> as top-level element".format(TEMPLATE_NAMESPACE)
                 )
             if "name" not in nonTemplateAttrs:
                 # TODO: same here
                 raise AssertionError(
-                    f"<{{{TEMPLATE_NAMESPACE}}}attr> requires a name attribute"
+                    "<{{{}}}attr> requires a name attribute".format(TEMPLATE_NAMESPACE)
                 )
             el = Tag(
                 "",
@@ -563,7 +564,7 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
         if ns != TEMPLATE_NAMESPACE and ns is not None:
             prefix = self.prefixMap[ns]
             if prefix is not None:
-                name = f"{self.prefixMap[ns]}:{name}"
+                name = "{}:{}".format(self.prefixMap[ns],name)
         el = Tag(
             name,
             attributes=OrderedDict(
@@ -578,7 +579,7 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
         self.current.append(el)
         self.current = el.children
 
-    def characters(self, ch: str) -> None:
+    def characters(self, ch):
         """
         Called when we receive some characters.  CDATA characters get passed
         through as is.
@@ -588,7 +589,7 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
             return
         self.current.append(ch)
 
-    def endElementNS(self, name: Tuple[str, str], qname: Optional[str]) -> None:
+    def endElementNS(self, name, qname):
         """
         A namespace tag is closed.  Pop the stack, if there's anything left in
         it, otherwise return to the document's namespace.
@@ -599,24 +600,24 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
         else:
             self.current = self.document
 
-    def startDTD(self, name: str, publicId: str, systemId: str) -> None:
+    def startDTD(self, name, publicId, systemId):
         """
         DTDs are ignored.
         """
 
-    def endDTD(self, *args: object) -> None:
+    def endDTD(self, *args):
         """
         DTDs are ignored.
         """
 
-    def startCDATA(self) -> None:
+    def startCDATA(self):
         """
         We're starting to be in a CDATA element, make a note of this.
         """
         self.inCDATA = True
         self.stack.append([])
 
-    def endCDATA(self) -> None:
+    def endCDATA(self):
         """
         We're no longer in a CDATA element.  Collect up the characters we've
         parsed and put them in a new CDATA object.
@@ -625,14 +626,14 @@ class _ToStan(handler.ContentHandler, handler.EntityResolver):
         comment = "".join(self.stack.pop())
         self.current.append(CDATA(comment))
 
-    def comment(self, content: str) -> None:
+    def comment(self, content):
         """
         Add an XML comment which we've encountered.
         """
         self.current.append(Comment(content))
 
 
-def _flatsaxParse(fl: Union[IO[AnyStr], str]) -> List["Flattenable"]:
+def _flatsaxParse(fl):
     """
     Perform a SAX parse of an XML document with the _ToStan class.
 
@@ -662,7 +663,7 @@ class XMLString:
     An L{ITemplateLoader} that loads and parses XML from a string.
     """
 
-    def __init__(self, s: Union[str, bytes]):
+    def __init__(self, s):
         """
         Run the parser on a L{io.StringIO} copy of the string.
 
@@ -672,10 +673,10 @@ class XMLString:
         if not isinstance(s, str):
             s = s.decode("utf8")
 
-        self._loadedTemplate: List["Flattenable"] = _flatsaxParse(io.StringIO(s))
+        self._loadedTemplate = _flatsaxParse(io.StringIO(s))
         """The loaded document."""
 
-    def load(self) -> List["Flattenable"]:
+    def load(self):
         """
         Return the document.
 
@@ -838,15 +839,15 @@ class TagLoader:
     An L{ITemplateLoader} that loads an existing flattenable object.
     """
 
-    def __init__(self, tag: "Flattenable"):
+    def __init__(self, tag):
         """
         @param tag: The object which will be loaded.
         """
 
-        self.tag: "Flattenable" = tag
+        self.tag = tag
         """The object which will be loaded."""
 
-    def load(self) -> List["Flattenable"]:
+    def load(self):
         return [self.tag]
 
 
@@ -856,7 +857,7 @@ class XMLFile:
     An L{ITemplateLoader} that loads and parses XML from a file.
     """
 
-    def __init__(self, path: FilePath):
+    def __init__(self, path):
         """
         Run the parser on a file.
 
@@ -870,13 +871,13 @@ class XMLFile:
                 stacklevel=2,
             )
 
-        self._loadedTemplate: Optional[List["Flattenable"]] = None
+        self._loadedTemplate = None
         """The loaded document, or L{None}, if not loaded."""
 
-        self._path: FilePath = path
+        self._path = path
         """The file that is being loaded from."""
 
-    def _loadDoc(self) -> List["Flattenable"]:
+    def _loadDoc(self):
         """
         Read and parse the XML.
 
@@ -888,10 +889,10 @@ class XMLFile:
             with self._path.open("r") as f:
                 return _flatsaxParse(f)
 
-    def __repr__(self) -> str:
-        return f"<XMLFile of {self._path!r}>"
+    def __repr__(self):
+        return "<XMLFile of {}>".format(repr(self._path))
 
-    def load(self) -> List["Flattenable"]:
+    def load(self):
         """
         Return the document, first loading it if necessary.
 
@@ -1044,13 +1045,13 @@ class _TagFactory:
     @see: L{tags}
     """
 
-    def __getattr__(self, tagName: str) -> Tag:
+    def __getattr__(self, tagName):
         if tagName == "transparent":
             return Tag("")
         # allow for E.del as E.del_
         tagName = tagName.rstrip("_")
         if tagName not in VALID_HTML_TAG_NAMES:
-            raise AttributeError(f"unknown tag {tagName!r}")
+            raise AttributeError("unknown tag {}".format(repr(tagName)))
         return Tag(tagName)
 
 
@@ -1058,11 +1059,11 @@ tags = _TagFactory()
 
 
 def renderElement(
-    request: IRequest,
-    element: IRenderable,
-    doctype: Optional[bytes] = b"<!DOCTYPE html>",
-    _failElement: Optional[Callable[[Failure], "Element"]] = None,
-) -> object:
+    request,
+    element,
+    doctype,
+    _failElement,
+):
     """
     Render an element or other L{IRenderable}.
 
@@ -1086,7 +1087,7 @@ def renderElement(
 
     d = flatten(request, element, request.write)
 
-    def eb(failure: Failure) -> Optional[Deferred[None]]:
+    def eb(failure):
         _moduleLog.failure(
             "An error occurred while rendering the response.", failure=failure
         )
@@ -1103,7 +1104,7 @@ def renderElement(
             )
             return None
 
-    def finish(result: object, *, request: IRequest = request) -> object:
+    def finish(result, request = request):
         request.finish()
         return result
 

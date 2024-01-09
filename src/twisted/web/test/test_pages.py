@@ -15,7 +15,7 @@ from twisted.web.resource import IResource
 from twisted.web.test.requesthelper import DummyRequest
 
 
-def _render(resource: IResource) -> DummyRequest:
+def _render(resource):
     """
     Render a response using the given resource.
 
@@ -39,7 +39,7 @@ class ErrorPageTests(SynchronousTestCase):
 
     maxDiff = None
 
-    def assertResponse(self, request: DummyRequest, code: int, body: bytes) -> None:
+    def assertResponse(self, request, code, body):
         self.assertEqual(request.responseCode, code)
         self.assertEqual(
             request.responseHeaders,
