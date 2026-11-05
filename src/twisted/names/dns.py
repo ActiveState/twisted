@@ -42,12 +42,15 @@ __all__ = [
     'OK', 'OP_INVERSE', 'OP_NOTIFY', 'OP_QUERY', 'OP_STATUS', 'OP_UPDATE',
     'PORT',
 
-    'AuthoritativeDomainError', 'DNSQueryTimeoutError', 'DomainError',
+    'AuthoritativeDomainError', 'DNSDecodeError', 'DNSQueryTimeoutError',
+    'DomainError',
     ]
 
 
 # System imports
 import inspect, struct, random, socket
+import threading
+from contextlib import contextmanager
 from itertools import chain
 
 from io import BytesIO
@@ -398,6 +401,73 @@ class IEncodable(Interface):
 
 
 
+class DNSDecodeError(ValueError):
+    """
+    Raised when a DNS message cannot be decoded because it violates a
+    protocol-level safety limit.
+    """
+
+
+
+class _DecodeContext(object):
+    """
+    Mutable state shared between the L{IEncodable} decoders invoked while
+    reading a single DNS message.
+
+    It bounds the total number of compression-pointer jumps taken across
+    every name in the message, defending against packets that fan out
+    thousands of records pointing at deeply chained pointers.
+
+    @ivar jumps: The number of compression pointers followed so far.
+    @ivar maxJumps: The inclusive upper bound on C{jumps}.
+    """
+    __slots__ = ("jumps", "maxJumps")
+
+    def __init__(self, maxJumps=1000):
+        self.jumps = 0
+        self.maxJumps = maxJumps
+
+
+    def registerJump(self):
+        """
+        Record that a compression pointer has been followed.
+
+        @raise DNSDecodeError: if the cumulative number of jumps exceeds
+            C{maxJumps}.
+        """
+        self.jumps += 1
+        if self.jumps > self.maxJumps:
+            raise DNSDecodeError(
+                "Too many compression pointers while decoding DNS message "
+                "(limit is %d)" % (self.maxJumps,))
+
+
+
+# Holds the L{_DecodeContext} of the message currently being decoded by
+# L{Message.decode}, so that the nested L{Name.decode} calls made by every
+# record decoder share one counter without threading it through each
+# signature.  (Upstream uses a contextvars.ContextVar, which does not exist
+# on Python 2; a thread-local restored in a finally block is equivalent for
+# Twisted's synchronous decoders.)
+_decodeContextState = threading.local()
+
+
+
+@contextmanager
+def _installDecodeContext(context):
+    """
+    Install C{context} as the active L{_DecodeContext} for the duration of
+    the C{with} block and restore the previous one on exit.
+    """
+    previous = getattr(_decodeContextState, "context", None)
+    _decodeContextState.context = context
+    try:
+        yield context
+    finally:
+        _decodeContextState.context = previous
+
+
+
 @implementer(IEncodable)
 class Charstr(object):
 
@@ -469,7 +539,13 @@ class Name:
 
     @ivar name: A byte string giving the name.
     @type name: L{bytes}
+
+    @ivar maxCompressionPointers: Cap on the number of compression-pointer
+        dereferences L{decode} will follow before raising L{DNSDecodeError}
+        when it is called outside of L{Message.decode}.
     """
+    maxCompressionPointers = 1000
+
     def __init__(self, name=b''):
         """
         @param name: A name.
@@ -526,7 +602,13 @@ class Name:
 
         @raise ValueError: Raised when the name cannot be decoded (for example,
             because it contains a loop).
+
+        @raise DNSDecodeError: Raised when the cumulative number of
+            compression-pointer jumps exceeds the configured limit.
         """
+        context = getattr(_decodeContextState, "context", None)
+        if context is None:
+            context = _DecodeContext(maxJumps=self.maxCompressionPointers)
         visited = set()
         self.name = b''
         off = 0
@@ -539,6 +621,7 @@ class Name:
             if (l >> 6) == 3:
                 new_off = ((l&63) << 8
                             | ord(readPrecisely(strio, 1)))
+                context.registerJump()
                 if new_off in visited:
                     raise ValueError("Compression loop in encoded name")
                 visited.add(new_off)
@@ -2376,6 +2459,10 @@ class Message(tputil.FancyEqMixin):
     @ivar _sectionNames: The names of attributes representing the record
         sections of this message.
     """
+    # Cap on the total number of compression-pointer dereferences followed
+    # across every name in one message; see L{_DecodeContext}.
+    maxCompressionPointers = 1000
+
     compareAttributes = (
         'id', 'answer', 'opCode', 'recDes', 'recAv',
         'auth', 'rCode', 'trunc', 'maxSize',
@@ -2552,22 +2639,26 @@ class Message(tputil.FancyEqMixin):
         self.checkingDisabled = ( byte4 >> 4 ) & 1
         self.rCode = byte4 & 0xf
 
-        self.queries = []
-        for i in range(nqueries):
-            q = Query()
-            try:
-                q.decode(strio)
-            except EOFError:
-                return
-            self.queries.append(q)
+        # A single shared counter bounds the total compression-pointer work
+        # performed across every name in this message.
+        decodeContext = _DecodeContext(maxJumps=self.maxCompressionPointers)
+        with _installDecodeContext(decodeContext):
+            self.queries = []
+            for i in range(nqueries):
+                q = Query()
+                try:
+                    q.decode(strio)
+                except EOFError:
+                    return
+                self.queries.append(q)
 
-        items = (
-            (self.answers, nans),
-            (self.authority, nns),
-            (self.additional, nadd))
+            items = (
+                (self.answers, nans),
+                (self.authority, nns),
+                (self.additional, nadd))
 
-        for (l, n) in items:
-            self.parseRecords(l, n, strio)
+            for (l, n) in items:
+                self.parseRecords(l, n, strio)
 
 
     def parseRecords(self, list, num, strio):
@@ -3075,6 +3166,12 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
             m.fromStr(data)
         except EOFError:
             log.msg("Truncated packet (%d bytes) from %s" % (len(data), addr))
+            return
+        except ValueError as ex:
+            # Malformed or hostile packet (compression loop, too many
+            # compression pointers, ...): note it briefly instead of logging
+            # a full traceback for every such datagram.
+            log.msg("Invalid packet (%s) from %s" % (ex, addr))
             return
         except:
             # Nothing should trigger this, but since we're potentially
