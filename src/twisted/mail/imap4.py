@@ -4796,6 +4796,87 @@ def wildcardToRegexp(wildcard, delim=None):
 
 
 
+class _WildcardPattern(object):
+    """
+    Match mailbox names against an IMAP C{LIST}/C{LSUB} pattern.
+
+    This gives the same answer as
+    C{wildcardToRegexp(wildcard, delim).match(name)} (a case-insensitive
+    match of the pattern against a prefix of C{name}) but runs a bit-parallel
+    NFA instead of a backtracking regular expression, so its cost is linear
+    in C{len(name)} whatever the pattern: a client cannot stall the reactor
+    with a pattern such as C{*a*a*a*a*a*b} against a long mailbox name.
+
+    @ivar pattern: The original wildcard string.
+    """
+
+    def __init__(self, wildcard, delim=None):
+        self.pattern = wildcard
+        self._delim = delim.lower() if delim is not None else None
+        # Collapse runs of wildcards: "**", "*%" and "%*" match the same
+        # strings as "*", and "%%" the same strings as "%".  Afterwards no
+        # two wildcard tokens are adjacent, which keeps the epsilon closure
+        # below to a single step.
+        tokens = []
+        for c in wildcard.lower():
+            if c in ('*', '%'):
+                if tokens and tokens[-1] in ('*', '%'):
+                    if c == '*' or tokens[-1] == '*':
+                        tokens[-1] = '*'
+                    continue
+                tokens.append(c)
+            else:
+                tokens.append((c,))
+        self._accept = 1 << len(tokens)
+        self._literal = {}
+        self._any = 0
+        self._noDelim = 0
+        for i, token in enumerate(tokens):
+            if token == '*':
+                self._any |= 1 << i
+            elif token == '%':
+                if delim is None:
+                    self._any |= 1 << i
+                else:
+                    self._noDelim |= 1 << i
+            else:
+                c = token[0]
+                self._literal[c] = self._literal.get(c, 0) | (1 << i)
+        self._wild = self._any | self._noDelim
+
+
+    def match(self, name):
+        """
+        @param name: A mailbox name.
+
+        @return: C{True} if a prefix of C{name} matches the pattern,
+            otherwise L{None}.
+        """
+        wild = self._wild
+        anyLoop = self._any
+        bothLoop = self._any | self._noDelim
+        literal = self._literal
+        accept = self._accept
+        delim = self._delim
+        # Bit i set: the first i tokens have been matched.
+        state = 1
+        state |= (state & wild) << 1
+        if state & accept:
+            return True
+        for c in name.lower():
+            if c == delim:
+                loop = anyLoop
+            else:
+                loop = bothLoop
+            state = ((state & literal.get(c, 0)) << 1) | (state & loop)
+            if not state:
+                return None
+            state |= (state & wild) << 1
+            if state & accept:
+                return True
+        return None
+
+
 def splitQuoted(s):
     """
     Split a string into whitespace delimited tokens
@@ -5213,7 +5294,7 @@ class MemoryAccountWithoutNamespaces(object):
 
     def listMailboxes(self, ref, wildcard):
         ref = self._inferiorNames(_parseMbox(ref.upper()))
-        wildcard = wildcardToRegexp(wildcard, '/')
+        wildcard = _WildcardPattern(wildcard, '/')
         return [(i, self.mailboxes[i]) for i in ref if wildcard.match(i)]
 
 

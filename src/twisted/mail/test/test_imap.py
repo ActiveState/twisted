@@ -848,6 +848,41 @@ class IMAP4HelperTests(unittest.TestCase):
                     imap4.wildcardToRegexp(special, delim).match(special))
 
 
+    def test_wildcardPatternMatchesRegexp(self):
+        """
+        L{imap4._WildcardPattern} gives the same answers as the regular
+        expression built by L{imap4.wildcardToRegexp}.
+        """
+        wildcards = ['foo/%gum/bar', 'foo/x%x/bar', 'foo/xyz*abc/bar', '*',
+                     '%', '', 'INBOX', 'inbox/*', '*%*', '%%/%', 'a.c*',
+                     '(a+)+z', '*/', '%/']
+        names = ['foo/bar', 'oo/lalagum/bar', 'foo/gumx/bar', 'foo/gum/baz',
+                 'foo/xgum/bar', 'foo/gum/bar', 'foo/x/gum/bar', 'foo/xx/bar',
+                 'foo/xyzabc/bar', 'foo/xyz/123/abc/bar', 'INBOX',
+                 'inbox/sub', 'a.cd', 'abcd', '(a+)+z', '', '/', 'x/y']
+        for delim in ('/', None):
+            for wildcard in wildcards:
+                regexp = imap4.wildcardToRegexp(wildcard, delim)
+                pattern = imap4._WildcardPattern(wildcard, delim)
+                for name in names:
+                    self.assertEqual(
+                        bool(regexp.match(name)), bool(pattern.match(name)),
+                        (wildcard, delim, name))
+
+
+    def test_wildcardPatternLinear(self):
+        """
+        L{imap4._WildcardPattern} does not backtrack: a pattern with many
+        wildcards against a long mailbox name that it does not match is
+        answered immediately.
+        """
+        pattern = imap4._WildcardPattern('*A' * 50 + 'B', '/')
+        self.assertIsNone(pattern.match('A' * 10000))
+        account = imap4.MemoryAccount('testuser')
+        account.addMailbox('A' * 2000, object())
+        self.assertEqual(account.listMailboxes('', '*A*A*A*A*A*A*A*A*B'), [])
+
+
     def test_wildcardNoDelim(self):
         cases = [
             ['foo/%gum/bar',
