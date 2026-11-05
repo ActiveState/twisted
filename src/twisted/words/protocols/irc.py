@@ -248,9 +248,15 @@ def parseModes(modes, params, paramModes=('', '')):
 class IRC(protocol.Protocol):
     """
     Internet Relay Chat server protocol.
+
+    @cvar MAX_LENGTH: The maximum length of a line to allow.  A received line
+        longer than this drops the connection, matching
+        L{twisted.protocols.basic.LineReceiver}, so an unterminated line
+        cannot grow the buffer without bound.  Default is 16384.
     """
 
     buffer = ""
+    MAX_LENGTH = 16384
     hostname = None
 
     encoding = None
@@ -411,8 +417,17 @@ class IRC(protocol.Protocol):
         # Put the (possibly empty) element after the last LF back in the
         # buffer
         self.buffer = lines.pop()
+        if len(self.buffer) > self.MAX_LENGTH:
+            # An unterminated line too long to be a valid message.
+            line, self.buffer = self.buffer, ""
+            self.lineLengthExceeded(line)
+            return
 
         for line in lines:
+            if len(line) > self.MAX_LENGTH:
+                self.buffer = ""
+                self.lineLengthExceeded(line)
+                return
             if len(line) <= 2:
                 # This is a blank line, at best.
                 continue
@@ -424,6 +439,17 @@ class IRC(protocol.Protocol):
             # DEBUG: log.msg( "%s %s %s" % (prefix, command, params))
 
             self.handleCommand(command, prefix, params)
+
+
+    def lineLengthExceeded(self, line):
+        """
+        Called when a line longer than C{MAX_LENGTH} is received.  The default
+        behaviour, matching L{twisted.protocols.basic.LineReceiver}, drops the
+        connection.
+
+        @param line: The line which exceeded the length limit.
+        """
+        self.transport.loseConnection()
 
 
     def handleCommand(self, command, prefix, params):
