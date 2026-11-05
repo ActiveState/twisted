@@ -2068,6 +2068,79 @@ class ParsingTests(unittest.TestCase):
         ])
 
 
+    def test_invalidHeaderValueCRLF(self):
+        """
+        A header value containing a bare CR or LF, or a NUL, is rejected with
+        a 400, as required by RFC 9110 section 5.5; accepting it would let a
+        following header be hidden from the parser and enable request
+        smuggling (CVE-2026-115877, GHSA-q7qq-6mhp-9rc4). The bytes are fed
+        directly because L{runRequest} normalises a bare LF to CRLF.
+        """
+        for value in [
+            b"a\nContent-Length: 5",  # bare LF hiding a header
+            b"a\rContent-Length: 5",  # bare CR hiding a header
+            b"a\nb",  # bare LF
+            b"a\rb",  # bare CR
+            b"a\x00b",  # NUL
+        ]:
+            for trailer in [b"", b"Host: bar.example\r\n"]:
+                channel = http.HTTPChannel()
+                transport = StringTransport()
+                channel.makeConnection(transport)
+                channel.dataReceived(
+                    b"GET / HTTP/1.1\r\nHost: foo.example\r\nx-foo: " +
+                    value + b"\r\n" + trailer + b"\r\n")
+                self.assertTrue(transport.disconnecting)
+                self.assertEqual(
+                    transport.value(), b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                self.assertEqual(channel.requests[0].requestHeaders
+                                 .getRawHeaders(b"x-foo"), None)
+
+
+    def test_invalidHeaderNameCRLF(self):
+        """
+        A header name containing a bare CR or LF, or a NUL, is rejected with a
+        400.  Unlike newer Twisted releases, this version does not otherwise
+        require header names to be RFC 9110 tokens, so without this check
+        C{Foo\nContent-Length: 5} would be accepted as one header named
+        C{foo\ncontent-length} that a lenient front-end reads as a
+        Content-Length.
+        """
+        for name in [
+            b"Foo\nContent-Length",
+            b"Foo\rContent-Length",
+            b"Foo\x00Bar",
+        ]:
+            channel = http.HTTPChannel()
+            transport = StringTransport()
+            channel.makeConnection(transport)
+            channel.dataReceived(
+                b"GET / HTTP/1.1\r\nHost: foo.example\r\n" +
+                name + b": 5\r\n\r\n")
+            self.assertTrue(transport.disconnecting)
+            self.assertEqual(
+                transport.value(), b"HTTP/1.1 400 Bad Request\r\n\r\n")
+
+
+    def test_smuggledRequestViaBareLF(self):
+        """
+        The GHSA-q7qq-6mhp-9rc4 proof of concept: a bare LF in a header value
+        must not let a second request hidden in the first one's body be
+        dispatched.
+        """
+        channel = http.HTTPChannel()
+        channel.requestFactory = DummyHTTPHandlerProxy
+        transport = StringTransport()
+        channel.makeConnection(transport)
+        channel.dataReceived(
+            b"POST /public HTTP/1.1\r\nHost: v\r\n"
+            b"Foo: x\nContent-Length: 44\r\n\r\n"
+            b"GET /admin HTTP/1.1\r\nHost: internal\r\n\r\n")
+        self.assertNotIn(b"/admin", transport.value())
+        self.assertEqual(
+            transport.value(), b"HTTP/1.1 400 Bad Request\r\n\r\n")
+
+
     def test_headerLimitPerRequest(self):
         """
         C{HTTPChannel} enforces the limit of C{HTTPChannel.maxHeaders} per

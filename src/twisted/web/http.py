@@ -2408,8 +2408,21 @@ class HTTPChannel(basic.LineReceiver, policies.TimeoutMixin):
             self._respondToBadRequestAndDisconnect()
             return False
 
+        # A header name or value must not contain NUL, CR, or LF (RFC 9110
+        # section 5.5). The channel splits lines only on CRLF, so a bare CR or
+        # LF here would let a lenient proxy see a header that we do not
+        # (CVE-2026-115877, GHSA-q7qq-6mhp-9rc4). This version does not
+        # require header names to be tokens, so check the name as well.
+        if len(header.translate(None, b"\x00\r\n")) != len(header):
+            self._respondToBadRequestAndDisconnect()
+            return False
+
         header = header.lower()
         data = data.strip(b" \t")
+
+        if len(data.translate(None, b"\x00\r\n")) != len(data):
+            self._respondToBadRequestAndDisconnect()
+            return False
 
         if not self._maybeChooseTransferDecoder(header, data):
             return False
