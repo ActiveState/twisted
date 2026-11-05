@@ -2330,8 +2330,13 @@ class HTTPChannel(basic.LineReceiver, policies.TimeoutMixin):
 
 
     def _finishRequestBody(self, data):
-        self.allContentReceived()
+        # Buffer any bytes following the request body *before* dispatching the
+        # request: a request that finishes synchronously inside
+        # allContentReceived replays self._dataBuffer from requestDone, and
+        # data appended afterwards would be left behind and processed out of
+        # order (CVE-2024-41671, GHSA-c8m8-j448-xjx7).
         self._dataBuffer.append(data)
+        self.allContentReceived()
 
     def _maybeChooseTransferDecoder(self, header, data):
         """
