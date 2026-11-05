@@ -4777,8 +4777,13 @@ def wildcardToRegexp(wildcard, delim=None):
     @param delim: the delimiter between IMAP path elements, if any.  Note
         that this is always C{"/"} when used by Twisted's IMAP server.
 
-    @return: a compiled regular expression that will match IMAP mailbox names
-        with the given wildcards.
+    @return: an object that behaves like a compiled regular expression that
+        will match IMAP mailbox names with the given wildcards.  Its
+        C{match()} runs a linear-time pre-check (L{_WildcardPattern}) and only
+        consults the regular expression when the name matches, so a hostile
+        pattern such as C{*a*a*a*a*a*b} cannot backtrack catastrophically on a
+        non-matching name.  Other methods (C{search}, C{pattern}, ...) are
+        those of the underlying compiled expression.
     """
     # Split on the two IMAP wildcards, escape everything else.
     result = []
@@ -4792,7 +4797,43 @@ def wildcardToRegexp(wildcard, delim=None):
                 result.append('(?:(?:[^%s])*?)' % (re.escape(delim),))
         else:
             result.append(re.escape(part))
-    return re.compile(''.join(result), re.I)
+    return _GuardedWildcardRegexp(re.compile(''.join(result), re.I),
+                                  _WildcardPattern(wildcard, delim))
+
+
+
+class _GuardedWildcardRegexp(object):
+    """
+    The return value of L{wildcardToRegexp}: a compiled regular expression
+    whose C{match()} is guarded by a linear-time L{_WildcardPattern}.
+
+    Even with the wildcards escaped, the generated expression backtracks
+    super-linearly on a name that does not match (C{*a*a*a*a*a*b} against
+    150 C{a}s takes minutes).  L{_WildcardPattern} gives the same yes/no
+    answer in linear time, so the expression only runs on names that match,
+    where it finds the match at once and returns the usual match object.
+
+    Attribute access other than C{match} goes to the compiled expression.
+    """
+
+    def __init__(self, regexp, matcher):
+        self._regexp = regexp
+        self._matcher = matcher
+
+
+    def match(self, string, *args, **kwargs):
+        """
+        Like C{re.match}, but return L{None} at once, in linear time, when
+        the linear matcher rules out a match.  Calls with C{pos}/C{endpos}
+        go straight to the compiled expression.
+        """
+        if not args and not kwargs and not self._matcher.match(string):
+            return None
+        return self._regexp.match(string, *args, **kwargs)
+
+
+    def __getattr__(self, name):
+        return getattr(self._regexp, name)
 
 
 

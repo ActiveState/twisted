@@ -12,6 +12,7 @@ import codecs
 import functools
 import locale
 import os
+import re
 from io import BytesIO
 import uuid
 
@@ -862,7 +863,9 @@ class IMAP4HelperTests(unittest.TestCase):
                  'inbox/sub', 'a.cd', 'abcd', '(a+)+z', '', '/', 'x/y']
         for delim in ('/', None):
             for wildcard in wildcards:
-                regexp = imap4.wildcardToRegexp(wildcard, delim)
+                # Compare against the raw compiled expression, not the
+                # guarded wrapper, which consults the pattern itself.
+                regexp = imap4.wildcardToRegexp(wildcard, delim)._regexp
                 pattern = imap4._WildcardPattern(wildcard, delim)
                 for name in names:
                     self.assertEqual(
@@ -881,6 +884,35 @@ class IMAP4HelperTests(unittest.TestCase):
         account = imap4.MemoryAccount('testuser')
         account.addMailbox('A' * 2000, object())
         self.assertEqual(account.listMailboxes('', '*A*A*A*A*A*A*A*A*B'), [])
+
+
+    def test_wildcardToRegexpLinearOnMismatch(self):
+        """
+        L{imap4.wildcardToRegexp} returns an expression whose C{match()} does
+        not backtrack catastrophically on a name that does not match, so
+        third-party callers are protected as well as the IMAP server.  On a
+        match it returns a real match object.
+        """
+        regexp = imap4.wildcardToRegexp('*a*a*a*a*a*b', None)
+        self.assertIsNone(regexp.match('a' * 5000))
+        match = regexp.match('a' * 5000 + 'b')
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(0), 'a' * 5000 + 'b')
+        regexp = imap4.wildcardToRegexp('%a%a%a%a%a%b', '/')
+        self.assertIsNone(regexp.match('a' * 5000))
+        self.assertIsNone(regexp.match('a/aaaaab'))
+
+
+    def test_wildcardToRegexpCompiledAttributes(self):
+        """
+        The object returned by L{imap4.wildcardToRegexp} exposes the compiled
+        expression's attributes, and C{match()} accepts C{pos}.
+        """
+        regexp = imap4.wildcardToRegexp('in*', None)
+        self.assertEqual(regexp.pattern, 'in(?:.*?)')
+        self.assertTrue(regexp.flags & re.I)
+        self.assertIsNotNone(regexp.search('xx-INBOX'))
+        self.assertIsNotNone(regexp.match('xxinbox', 2))
 
 
     def test_wildcardNoDelim(self):
