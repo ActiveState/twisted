@@ -3124,11 +3124,42 @@ class DNSMixin(object):
         deferred.errback(failure.Failure(DNSQueryTimeoutError(id)))
 
 
+def _canonicalAddress(address):
+    """
+    Return a canonical C{(host, port)} form of a UDP address so that the
+    address a query was sent to can be compared with the source address
+    reported by the transport for its response.
+
+    IPv4 and IPv6 literals are normalized through C{inet_pton}/C{inet_ntop}
+    (so that, for example, C{"2001:DB8:0:0::1"} and C{"2001:db8::1"} compare
+    equal); anything else is compared as given.
+    """
+    try:
+        host, port = address[0], address[1]
+    except (TypeError, IndexError, KeyError):
+        return address
+    for family in (socket.AF_INET, AF_INET6):
+        try:
+            host = socket.inet_ntop(family, socket.inet_pton(family, host))
+        except (socket.error, ValueError, TypeError):
+            continue
+        else:
+            break
+    return (host, port)
+
+
+
 class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
     """
     DNS protocol over UDP.
+
+    @ivar _addressValidation: A map of C{{message-id: expected source
+        address}}.  The response to a query issued over UDP must come from
+        the address (host and port) the query was sent to; a response for a
+        live message ID from any other address is discarded.
     """
     resends = None
+    _addressValidation = None
 
     def stopProtocol(self):
         """
@@ -3136,6 +3167,7 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
         """
         self.liveMessages = {}
         self.resends = {}
+        self._addressValidation = {}
         self.transport = None
 
     def startProtocol(self):
@@ -3144,6 +3176,7 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
         """
         self.liveMessages = {}
         self.resends = {}
+        self._addressValidation = {}
 
     def writeMessage(self, message, address):
         """
@@ -3155,6 +3188,14 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
 
     def startListening(self):
         self._reactor.listenUDP(0, self, maxPacketSize=512)
+
+    def _clearFailed(self, deferred, id):
+        """
+        Clean the Deferred and the expected source address after a timeout.
+        """
+        if self._addressValidation is not None:
+            self._addressValidation.pop(id, None)
+        DNSMixin._clearFailed(self, deferred, id)
 
     def datagramReceived(self, data, addr):
         """
@@ -3182,6 +3223,13 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
             return
 
         if m.id in self.liveMessages:
+            # Only accept the response from the address the query was sent
+            # to; anything else is a spoofing attempt (or a stray packet)
+            # and is dropped without consuming the pending query.
+            expected = (self._addressValidation or {}).get(m.id)
+            if expected is None or expected != _canonicalAddress(addr):
+                return
+            del self._addressValidation[m.id]
             d, canceller = self.liveMessages[m.id]
             del self.liveMessages[m.id]
             canceller.cancel()
@@ -3231,7 +3279,14 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
         def writeMessage(m):
             self.writeMessage(m, address)
 
-        return self._query(queries, timeout, id, writeMessage)
+        if self._addressValidation is None:
+            self._addressValidation = {}
+        self._addressValidation[id] = _canonicalAddress(address)
+        d = self._query(queries, timeout, id, writeMessage)
+        if id not in self.liveMessages:
+            # writeMessage failed; nothing is pending for this id.
+            self._addressValidation.pop(id, None)
+        return d
 
 
 class DNSProtocol(DNSMixin, protocol.Protocol):

@@ -1408,6 +1408,64 @@ class DatagramProtocolTests(unittest.TestCase):
         return d
 
 
+    def test_discardedResponses(self):
+        """
+        A response whose message ID matches a pending query is only accepted
+        if it comes from the host and port the query was sent to; responses
+        from anywhere else are dropped and leave the query pending.
+        """
+        d = self.proto.query(('127.0.0.1', 21345), [dns.Query(b'foo')],
+                             id=4321)
+        results = []
+        d.addCallback(results.append)
+        self.assertEqual(len(self.proto.liveMessages.keys()), 1)
+        m = dns.Message()
+        m.id = 1234
+        m.answers = [dns.RRHeader(payload=dns.Record_A(address='1.2.3.4'))]
+        self.proto.datagramReceived(m.toStr(), ('127.0.0.1', 21345))
+        self.assertEqual(results, [])
+        m.id = 4321
+        self.proto.datagramReceived(m.toStr(), ('127.0.0.2', 21345))
+        self.assertEqual(results, [])
+        self.proto.datagramReceived(m.toStr(), ('127.0.0.1', 21346))
+        self.assertEqual(results, [])
+        self.assertIn(4321, self.proto.liveMessages)
+        self.proto.datagramReceived(m.toStr(), ('127.0.0.1', 21345))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0].answers[0].payload.dottedQuad(), '1.2.3.4')
+        self.assertEqual(self.proto.liveMessages, {})
+        self.assertEqual(self.proto._addressValidation, {})
+
+
+    def test_responseFromEquivalentIPv6Address(self):
+        """
+        The expected source address is compared in canonical form, so a
+        response from C{2001:db8::1} answers a query sent to
+        C{2001:DB8:0:0:0:0:0:1}.
+        """
+        d = self.proto.query(('2001:DB8:0:0:0:0:0:1', 53),
+                             [dns.Query(b'foo')], id=4321)
+        results = []
+        d.addCallback(results.append)
+        m = dns.Message()
+        m.id = 4321
+        self.proto.datagramReceived(m.toStr(), ('2001:db8::2', 53))
+        self.assertEqual(results, [])
+        self.proto.datagramReceived(m.toStr(), ('2001:db8::1', 53))
+        self.assertEqual(len(results), 1)
+
+
+    def test_queryTimeoutClearsAddressValidation(self):
+        """
+        When a query times out its expected source address is forgotten.
+        """
+        d = self.proto.query(('127.0.0.1', 21345), [dns.Query(b'foo')])
+        self.clock.advance(10)
+        self.assertEqual(self.proto._addressValidation, {})
+        return self.assertFailure(d, dns.DNSQueryTimeoutError)
+
+
     def test_queryTimeout(self):
         """
         Test that query timeouts after some seconds.
