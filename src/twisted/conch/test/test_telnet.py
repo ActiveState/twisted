@@ -16,6 +16,7 @@ from twisted.internet import defer
 from twisted.conch import telnet
 
 from twisted.trial import unittest
+from twisted.logger import LogLevel, capturedLogs
 from twisted.test import proto_helpers
 from twisted.python.compat import iterbytes
 
@@ -262,6 +263,130 @@ class TelnetTransportTests(unittest.TestCase):
 
             self.assertEqual(h.data, b''.join(L).replace(cmd, b''))
             self.assertEqual(h.subcmd, [telnet.SE] + list(iterbytes(b'hello')))
+
+
+    def test_boundedSubnegotiationIsDelivered(self):
+        """
+        A subnegotiation whose payload is within
+        L{telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH} is delivered to the
+        negotiation handler as usual and the connection is left open.
+        """
+        h = self.p.protocol
+        payload = b"C" * 16
+        cmd = telnet.IAC + telnet.SB + b"\x12" + payload + telnet.IAC + telnet.SE
+        self.p.dataReceived(cmd)
+        self.assertEqual(h.subcmd, list(iterbytes(payload)))
+        self.assertFalse(self.t.disconnecting)
+
+
+    def test_applicationDataBeforeOversizedSubnegotiationIsDelivered(self):
+        """
+        Application data received before an over-long subnegotiation in the
+        same call is still delivered when the connection is dropped.
+        """
+        h = self.p.protocol
+        cap = telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH
+        self.p.dataReceived(
+            b"hello" + telnet.IAC + telnet.SB + b"\x12" + b"A" * (cap * 2))
+        self.assertEqual(h.data, b"hello")
+        self.assertTrue(self.t.disconnecting)
+
+
+    def test_oversizedSubnegotiationDropsConnection(self):
+        """
+        A subnegotiation whose payload reaches
+        L{telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH} without an C{IAC SE}
+        terminator stops growing at the cap and the connection is dropped;
+        payload that arrives afterwards does not grow the buffer.
+        """
+        cap = telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH
+        self.p.dataReceived(telnet.IAC + telnet.SB + b"\x12")
+        self.p.dataReceived(b"A" * (cap * 4))
+        self.assertTrue(self.t.disconnecting)
+        self.assertEqual(len(self.p.commands), cap)
+        self.p.dataReceived(b"A" * 16)
+        self.assertEqual(len(self.p.commands), cap)
+
+
+    def test_oversizedSubnegotiationIsNotDelivered(self):
+        """
+        An over-long subnegotiation is dropped rather than delivered
+        truncated: the negotiation handler is never invoked.
+        """
+        h = self.p.protocol
+        h.subcmd = "UNSET"
+        cap = telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH
+        cmd = (telnet.IAC + telnet.SB + b"\x12" + b"B" * (cap * 2) +
+               telnet.IAC + telnet.SE)
+        self.p.dataReceived(cmd)
+        self.assertEqual(h.subcmd, "UNSET")
+        self.assertTrue(self.t.disconnecting)
+
+
+    def test_subnegotiationEscapedBytesCountTowardCap(self):
+        """
+        Bytes delivered as an escaped C{IAC IAC} inside a subnegotiation
+        count toward L{telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH}.
+        """
+        cap = telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH
+        self.p.dataReceived(telnet.IAC + telnet.SB + b"\x12")
+        self.p.dataReceived((telnet.IAC + telnet.IAC) * (cap * 2))
+        self.assertTrue(self.t.disconnecting)
+        self.assertEqual(len(self.p.commands), cap)
+
+
+    def test_subnegotiationAtCapIsDelivered(self):
+        """
+        A properly terminated subnegotiation that fills the buffer to exactly
+        L{telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH} is delivered.
+        """
+        h = self.p.protocol
+        cap = telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH
+        # One command byte plus (cap - 1) payload bytes fills the buffer.
+        payload = b"D" * (cap - 1)
+        cmd = telnet.IAC + telnet.SB + b"\x12" + payload + telnet.IAC + telnet.SE
+        self.p.dataReceived(cmd)
+        self.assertEqual(h.subcmd, list(iterbytes(payload)))
+        self.assertFalse(self.t.disconnecting)
+
+
+    def test_capResetsPerSubnegotiation(self):
+        """
+        The cap is per subnegotiation: many separately terminated, under-cap
+        subnegotiations in a row are each delivered.
+        """
+        h = self.p.protocol
+        one = telnet.IAC + telnet.SB + b"\x12" + b"E" * 32 + telnet.IAC + telnet.SE
+        for _ in range(2000):
+            self.p.dataReceived(one)
+        self.assertEqual(h.subcmd, list(iterbytes(b"E" * 32)))
+        self.assertFalse(self.t.disconnecting)
+
+
+    def test_oversizedSubnegotiationLogsAndDropsOnce(self):
+        """
+        Reaching the cap logs a single warning and drops the connection once,
+        even when further subnegotiation payload keeps arriving.
+        """
+        cap = telnet.Telnet._MAX_SUBNEGOTIATION_LENGTH
+        drops = []
+        original = self.t.loseConnection
+
+        def countingLoseConnection():
+            drops.append(None)
+            original()
+
+        self.t.loseConnection = countingLoseConnection
+        with capturedLogs() as events:
+            self.p.dataReceived(telnet.IAC + telnet.SB + b"\x12")
+            self.p.dataReceived(b"A" * (cap * 4))
+            self.p.dataReceived(b"A" * 128)
+        warnings = [
+            e for e in events
+            if e.get("log_level") is LogLevel.warn
+            and "subnegotiation" in (e.get("log_format") or "")]
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(len(drops), 1)
 
 
     def _enabledHelper(self, o, eL=[], eR=[], dL=[], dR=[]):
