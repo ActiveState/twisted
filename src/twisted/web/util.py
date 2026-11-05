@@ -37,6 +37,27 @@ def _PRE(text):
 
 
 
+def _escapeHTMLAttribute(text):
+    """
+    HTML-escape a native string for use inside a double- or single-quoted
+    attribute value, matching Python 3's C{html.escape(text, quote=True)}.
+
+    L{twisted.python.compat.escape} cannot be used here because on Python 2
+    it is C{cgi.escape}, which leaves quotes alone by default.
+
+    @param text: The text to escape.
+    @type text: native L{str}
+
+    @rtype: native L{str}
+    """
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("'", "&#x27;"))
+
+
+
 def redirectTo(URL, request):
     """
     Generate a redirect to the given location.
@@ -70,7 +91,7 @@ def redirectTo(URL, request):
     <a href=\"%(url)s\">click here</a>
     </body>
 </html>
-""" % {'url': nativeString(URL)}
+""" % {'url': _escapeHTMLAttribute(nativeString(URL))}
     if _PY3:
         content = content.encode("utf8")
     return content

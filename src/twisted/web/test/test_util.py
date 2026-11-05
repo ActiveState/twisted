@@ -59,6 +59,63 @@ class RedirectToTests(TestCase):
         self.assertRaises(TypeError, redirectTo, targetURL, request)
 
 
+    def test_legitimateRedirect(self):
+        """
+        Legitimate URLs are fully interpolated in the C{redirectTo} response
+        body without transformation.
+        """
+        request = DummyRequest([b""])
+        html = redirectTo(b"https://twisted.org/", request)
+        expected = b"""
+<html>
+    <head>
+        <meta http-equiv=\"refresh\" content=\"0;URL=https://twisted.org/\">
+    </head>
+    <body bgcolor=\"#FFFFFF\" text=\"#000000\">
+    <a href=\"https://twisted.org/\">click here</a>
+    </body>
+</html>
+"""
+        self.assertEqual(html, expected)
+
+
+    def test_maliciousRedirect(self):
+        """
+        Malicious URLs are HTML-escaped before interpolating them in the
+        C{redirectTo} response body (CVE-2024-41810, GHSA-cf56-g6w6-pqq2).
+        """
+        request = DummyRequest([b""])
+        html = redirectTo(
+            b'https://twisted.org/"><script>alert(document.location)</script>',
+            request)
+        expected = b"""
+<html>
+    <head>
+        <meta http-equiv=\"refresh\" content=\"0;URL=https://twisted.org/&quot;&gt;&lt;script&gt;alert(document.location)&lt;/script&gt;\">
+    </head>
+    <body bgcolor=\"#FFFFFF\" text=\"#000000\">
+    <a href=\"https://twisted.org/&quot;&gt;&lt;script&gt;alert(document.location)&lt;/script&gt;\">click here</a>
+    </body>
+</html>
+"""
+        self.assertEqual(html, expected)
+
+
+    def test_redirectEscapesAmpersandAndQuote(self):
+        """
+        Ampersands and single quotes in the URL are escaped too, matching
+        Python 3's C{html.escape} which upstream uses.
+        """
+        request = DummyRequest([b""])
+        html = redirectTo(b"https://twisted.org/?a=1&b='x'", request)
+        self.assertIn(
+            b'href="https://twisted.org/?a=1&amp;b=&#x27;x&#x27;"', html)
+        # The Location header itself is left untouched.
+        self.assertEqual(
+            request.responseHeaders.getRawHeaders(b"location"),
+            [b"https://twisted.org/?a=1&b='x'"])
+
+
 
 class FailureElementTests(TestCase):
     """
