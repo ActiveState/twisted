@@ -337,6 +337,47 @@ class NameTests(unittest.TestCase):
         self.assertRaises(ValueError, name.decode, stream)
 
 
+    def test_rejectTooManyCompressionPointers(self):
+        """
+        L{Name.decode} raises L{dns.DNSDecodeError} when it would have to
+        follow more than L{Name.maxCompressionPointers} compression pointers
+        to finish decoding a name.
+        """
+        # Four distinct pointers chained end-to-end, terminated by a zero
+        # label byte.  With maxCompressionPointers of three the fourth
+        # dereference must trip the safety limit.
+        payload = b"\xc0\x02\xc0\x04\xc0\x06\xc0\x08\x00"
+        name = dns.Name()
+        name.maxCompressionPointers = 3
+        self.assertRaises(
+            dns.DNSDecodeError, name.decode, BytesIO(payload))
+
+
+    def test_decodeRecoversAfterDNSDecodeError(self):
+        """
+        After L{Name.decode} raises L{dns.DNSDecodeError}, subsequent
+        L{Name.decode} calls continue to work: no compression-pointer
+        counter leaks across calls.
+        """
+        hostile = dns.Name()
+        hostile.maxCompressionPointers = 3
+        self.assertRaises(
+            dns.DNSDecodeError, hostile.decode,
+            BytesIO(b"\xc0\x02\xc0\x04\xc0\x06\xc0\x08\x00"))
+
+        stream = BytesIO()
+        dns.Name(b"example.org").encode(stream)
+
+        fresh = dns.Name()
+        stream.seek(0)
+        fresh.decode(stream)
+        self.assertEqual(fresh.name, b"example.org")
+
+        stream.seek(0)
+        hostile.decode(stream)
+        self.assertEqual(hostile.name, b"example.org")
+
+
     def test_equality(self):
         """
         L{Name} instances are equal as long as they have the same value for
@@ -738,6 +779,59 @@ class MessageTests(unittest.SynchronousTestCase):
     """
     Tests for L{twisted.names.dns.Message}.
     """
+
+    def test_rejectCompressionPointerFlood(self):
+        """
+        L{Message.decode} shares one compression-pointer counter across every
+        record in the message and raises L{dns.DNSDecodeError} once the
+        aggregate number of pointer dereferences exceeds
+        L{dns.Message.maxCompressionPointers}, even though no single name
+        exceeds the limit on its own.
+        """
+        chainLength = 100
+        numRecords = 8000
+        header = struct.pack(
+            "!H2B4H", 0x1234, 0x80, 0x00, 0, numRecords, 0, 0)
+
+        # Long compression chain inside the RDATA of an unknown record so
+        # that subsequent records can aim pointers at it.
+        owner = b"\x04rrrr\x00"
+        chainBase = len(header) + len(owner) + 10
+        chain = b""
+        for i in range(chainLength):
+            chain += struct.pack("!H", 0xC000 | (chainBase + 2 * (i + 1)))
+        chain += b"\x04test\x00"
+
+        firstRecord = (
+            owner + struct.pack("!HHIH", 999, 1, 0, len(chain)) + chain)
+        followupRecord = (
+            struct.pack("!H", 0xC000 | chainBase)
+            + struct.pack("!HHIH", 1, 1, 0, 4)
+            + b"\x00\x00\x00\x00")
+        payload = header + firstRecord + followupRecord * (numRecords - 1)
+
+        message = dns.Message()
+        self.assertRaises(
+            dns.DNSDecodeError, message.decode, BytesIO(payload))
+
+
+    def test_compressionPointerLimitIsPerMessage(self):
+        """
+        The compression-pointer budget is reset for every message: decoding
+        many ordinary, compressed messages in a row never trips the limit.
+        """
+        m = dns.Message()
+        m.queries = [dns.Query(b"example.com")]
+        m.answers = [
+            dns.RRHeader(b"example.com", type=dns.CNAME,
+                         payload=dns.Record_CNAME(b"www.example.com"))
+            for i in range(20)]
+        data = m.toStr()
+        for i in range(100):
+            decoded = dns.Message()
+            decoded.fromStr(data)
+            self.assertEqual(len(decoded.answers), 20)
+
 
     def test_authenticDataDefault(self):
         """
@@ -1281,6 +1375,23 @@ class DatagramProtocolTests(unittest.TestCase):
         self.assertEqual(self.controller.messages, [])
 
 
+    def test_compressionPointerFloodDatagram(self):
+        """
+        A datagram whose names need more compression-pointer jumps than
+        L{dns.Message.maxCompressionPointers} is dropped without raising and
+        without logging an error.
+        """
+        header = struct.pack("!H2B4H", 1, 0, 0, 1, 0, 0, 0)
+        chain = b""
+        for i in range(1100):
+            chain += struct.pack("!H", 0xC000 | (12 + 2 * (i + 1)))
+        chain += b"\x00"
+        self.proto.datagramReceived(
+            header + chain + b"\x00\x01\x00\x01", ('127.0.0.1', 12345))
+        self.assertEqual(self.controller.messages, [])
+        self.assertEqual(self.flushLoggedErrors(), [])
+
+
     def test_simpleQuery(self):
         """
         Test content received after a query.
@@ -1295,6 +1406,64 @@ class DatagramProtocolTests(unittest.TestCase):
         d.addCallback(cb)
         self.proto.datagramReceived(m.toStr(), ('127.0.0.1', 21345))
         return d
+
+
+    def test_discardedResponses(self):
+        """
+        A response whose message ID matches a pending query is only accepted
+        if it comes from the host and port the query was sent to; responses
+        from anywhere else are dropped and leave the query pending.
+        """
+        d = self.proto.query(('127.0.0.1', 21345), [dns.Query(b'foo')],
+                             id=4321)
+        results = []
+        d.addCallback(results.append)
+        self.assertEqual(len(self.proto.liveMessages.keys()), 1)
+        m = dns.Message()
+        m.id = 1234
+        m.answers = [dns.RRHeader(payload=dns.Record_A(address='1.2.3.4'))]
+        self.proto.datagramReceived(m.toStr(), ('127.0.0.1', 21345))
+        self.assertEqual(results, [])
+        m.id = 4321
+        self.proto.datagramReceived(m.toStr(), ('127.0.0.2', 21345))
+        self.assertEqual(results, [])
+        self.proto.datagramReceived(m.toStr(), ('127.0.0.1', 21346))
+        self.assertEqual(results, [])
+        self.assertIn(4321, self.proto.liveMessages)
+        self.proto.datagramReceived(m.toStr(), ('127.0.0.1', 21345))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0].answers[0].payload.dottedQuad(), '1.2.3.4')
+        self.assertEqual(self.proto.liveMessages, {})
+        self.assertEqual(self.proto._addressValidation, {})
+
+
+    def test_responseFromEquivalentIPv6Address(self):
+        """
+        The expected source address is compared in canonical form, so a
+        response from C{2001:db8::1} answers a query sent to
+        C{2001:DB8:0:0:0:0:0:1}.
+        """
+        d = self.proto.query(('2001:DB8:0:0:0:0:0:1', 53),
+                             [dns.Query(b'foo')], id=4321)
+        results = []
+        d.addCallback(results.append)
+        m = dns.Message()
+        m.id = 4321
+        self.proto.datagramReceived(m.toStr(), ('2001:db8::2', 53))
+        self.assertEqual(results, [])
+        self.proto.datagramReceived(m.toStr(), ('2001:db8::1', 53))
+        self.assertEqual(len(results), 1)
+
+
+    def test_queryTimeoutClearsAddressValidation(self):
+        """
+        When a query times out its expected source address is forgotten.
+        """
+        d = self.proto.query(('127.0.0.1', 21345), [dns.Query(b'foo')])
+        self.clock.advance(10)
+        self.assertEqual(self.proto._addressValidation, {})
+        return self.assertFailure(d, dns.DNSQueryTimeoutError)
 
 
     def test_queryTimeout(self):

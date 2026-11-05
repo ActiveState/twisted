@@ -42,12 +42,15 @@ __all__ = [
     'OK', 'OP_INVERSE', 'OP_NOTIFY', 'OP_QUERY', 'OP_STATUS', 'OP_UPDATE',
     'PORT',
 
-    'AuthoritativeDomainError', 'DNSQueryTimeoutError', 'DomainError',
+    'AuthoritativeDomainError', 'DNSDecodeError', 'DNSQueryTimeoutError',
+    'DomainError',
     ]
 
 
 # System imports
 import inspect, struct, random, socket
+import threading
+from contextlib import contextmanager
 from itertools import chain
 
 from io import BytesIO
@@ -398,6 +401,73 @@ class IEncodable(Interface):
 
 
 
+class DNSDecodeError(ValueError):
+    """
+    Raised when a DNS message cannot be decoded because it violates a
+    protocol-level safety limit.
+    """
+
+
+
+class _DecodeContext(object):
+    """
+    Mutable state shared between the L{IEncodable} decoders invoked while
+    reading a single DNS message.
+
+    It bounds the total number of compression-pointer jumps taken across
+    every name in the message, defending against packets that fan out
+    thousands of records pointing at deeply chained pointers.
+
+    @ivar jumps: The number of compression pointers followed so far.
+    @ivar maxJumps: The inclusive upper bound on C{jumps}.
+    """
+    __slots__ = ("jumps", "maxJumps")
+
+    def __init__(self, maxJumps=1000):
+        self.jumps = 0
+        self.maxJumps = maxJumps
+
+
+    def registerJump(self):
+        """
+        Record that a compression pointer has been followed.
+
+        @raise DNSDecodeError: if the cumulative number of jumps exceeds
+            C{maxJumps}.
+        """
+        self.jumps += 1
+        if self.jumps > self.maxJumps:
+            raise DNSDecodeError(
+                "Too many compression pointers while decoding DNS message "
+                "(limit is %d)" % (self.maxJumps,))
+
+
+
+# Holds the L{_DecodeContext} of the message currently being decoded by
+# L{Message.decode}, so that the nested L{Name.decode} calls made by every
+# record decoder share one counter without threading it through each
+# signature.  (Upstream uses a contextvars.ContextVar, which does not exist
+# on Python 2; a thread-local restored in a finally block is equivalent for
+# Twisted's synchronous decoders.)
+_decodeContextState = threading.local()
+
+
+
+@contextmanager
+def _installDecodeContext(context):
+    """
+    Install C{context} as the active L{_DecodeContext} for the duration of
+    the C{with} block and restore the previous one on exit.
+    """
+    previous = getattr(_decodeContextState, "context", None)
+    _decodeContextState.context = context
+    try:
+        yield context
+    finally:
+        _decodeContextState.context = previous
+
+
+
 @implementer(IEncodable)
 class Charstr(object):
 
@@ -469,7 +539,13 @@ class Name:
 
     @ivar name: A byte string giving the name.
     @type name: L{bytes}
+
+    @ivar maxCompressionPointers: Cap on the number of compression-pointer
+        dereferences L{decode} will follow before raising L{DNSDecodeError}
+        when it is called outside of L{Message.decode}.
     """
+    maxCompressionPointers = 1000
+
     def __init__(self, name=b''):
         """
         @param name: A name.
@@ -526,7 +602,13 @@ class Name:
 
         @raise ValueError: Raised when the name cannot be decoded (for example,
             because it contains a loop).
+
+        @raise DNSDecodeError: Raised when the cumulative number of
+            compression-pointer jumps exceeds the configured limit.
         """
+        context = getattr(_decodeContextState, "context", None)
+        if context is None:
+            context = _DecodeContext(maxJumps=self.maxCompressionPointers)
         visited = set()
         self.name = b''
         off = 0
@@ -539,6 +621,7 @@ class Name:
             if (l >> 6) == 3:
                 new_off = ((l&63) << 8
                             | ord(readPrecisely(strio, 1)))
+                context.registerJump()
                 if new_off in visited:
                     raise ValueError("Compression loop in encoded name")
                 visited.add(new_off)
@@ -2376,6 +2459,10 @@ class Message(tputil.FancyEqMixin):
     @ivar _sectionNames: The names of attributes representing the record
         sections of this message.
     """
+    # Cap on the total number of compression-pointer dereferences followed
+    # across every name in one message; see L{_DecodeContext}.
+    maxCompressionPointers = 1000
+
     compareAttributes = (
         'id', 'answer', 'opCode', 'recDes', 'recAv',
         'auth', 'rCode', 'trunc', 'maxSize',
@@ -2552,22 +2639,26 @@ class Message(tputil.FancyEqMixin):
         self.checkingDisabled = ( byte4 >> 4 ) & 1
         self.rCode = byte4 & 0xf
 
-        self.queries = []
-        for i in range(nqueries):
-            q = Query()
-            try:
-                q.decode(strio)
-            except EOFError:
-                return
-            self.queries.append(q)
+        # A single shared counter bounds the total compression-pointer work
+        # performed across every name in this message.
+        decodeContext = _DecodeContext(maxJumps=self.maxCompressionPointers)
+        with _installDecodeContext(decodeContext):
+            self.queries = []
+            for i in range(nqueries):
+                q = Query()
+                try:
+                    q.decode(strio)
+                except EOFError:
+                    return
+                self.queries.append(q)
 
-        items = (
-            (self.answers, nans),
-            (self.authority, nns),
-            (self.additional, nadd))
+            items = (
+                (self.answers, nans),
+                (self.authority, nns),
+                (self.additional, nadd))
 
-        for (l, n) in items:
-            self.parseRecords(l, n, strio)
+            for (l, n) in items:
+                self.parseRecords(l, n, strio)
 
 
     def parseRecords(self, list, num, strio):
@@ -3033,11 +3124,42 @@ class DNSMixin(object):
         deferred.errback(failure.Failure(DNSQueryTimeoutError(id)))
 
 
+def _canonicalAddress(address):
+    """
+    Return a canonical C{(host, port)} form of a UDP address so that the
+    address a query was sent to can be compared with the source address
+    reported by the transport for its response.
+
+    IPv4 and IPv6 literals are normalized through C{inet_pton}/C{inet_ntop}
+    (so that, for example, C{"2001:DB8:0:0::1"} and C{"2001:db8::1"} compare
+    equal); anything else is compared as given.
+    """
+    try:
+        host, port = address[0], address[1]
+    except (TypeError, IndexError, KeyError):
+        return address
+    for family in (socket.AF_INET, AF_INET6):
+        try:
+            host = socket.inet_ntop(family, socket.inet_pton(family, host))
+        except (socket.error, ValueError, TypeError):
+            continue
+        else:
+            break
+    return (host, port)
+
+
+
 class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
     """
     DNS protocol over UDP.
+
+    @ivar _addressValidation: A map of C{{message-id: expected source
+        address}}.  The response to a query issued over UDP must come from
+        the address (host and port) the query was sent to; a response for a
+        live message ID from any other address is discarded.
     """
     resends = None
+    _addressValidation = None
 
     def stopProtocol(self):
         """
@@ -3045,6 +3167,7 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
         """
         self.liveMessages = {}
         self.resends = {}
+        self._addressValidation = {}
         self.transport = None
 
     def startProtocol(self):
@@ -3053,6 +3176,7 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
         """
         self.liveMessages = {}
         self.resends = {}
+        self._addressValidation = {}
 
     def writeMessage(self, message, address):
         """
@@ -3065,6 +3189,14 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
     def startListening(self):
         self._reactor.listenUDP(0, self, maxPacketSize=512)
 
+    def _clearFailed(self, deferred, id):
+        """
+        Clean the Deferred and the expected source address after a timeout.
+        """
+        if self._addressValidation is not None:
+            self._addressValidation.pop(id, None)
+        DNSMixin._clearFailed(self, deferred, id)
+
     def datagramReceived(self, data, addr):
         """
         Read a datagram, extract the message in it and trigger the associated
@@ -3076,6 +3208,12 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
         except EOFError:
             log.msg("Truncated packet (%d bytes) from %s" % (len(data), addr))
             return
+        except ValueError as ex:
+            # Malformed or hostile packet (compression loop, too many
+            # compression pointers, ...): note it briefly instead of logging
+            # a full traceback for every such datagram.
+            log.msg("Invalid packet (%s) from %s" % (ex, addr))
+            return
         except:
             # Nothing should trigger this, but since we're potentially
             # invoking a lot of different decoding methods, we might as well
@@ -3085,6 +3223,13 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
             return
 
         if m.id in self.liveMessages:
+            # Only accept the response from the address the query was sent
+            # to; anything else is a spoofing attempt (or a stray packet)
+            # and is dropped without consuming the pending query.
+            expected = (self._addressValidation or {}).get(m.id)
+            if expected is None or expected != _canonicalAddress(addr):
+                return
+            del self._addressValidation[m.id]
             d, canceller = self.liveMessages[m.id]
             del self.liveMessages[m.id]
             canceller.cancel()
@@ -3134,7 +3279,14 @@ class DNSDatagramProtocol(DNSMixin, protocol.DatagramProtocol):
         def writeMessage(m):
             self.writeMessage(m, address)
 
-        return self._query(queries, timeout, id, writeMessage)
+        if self._addressValidation is None:
+            self._addressValidation = {}
+        self._addressValidation[id] = _canonicalAddress(address)
+        d = self._query(queries, timeout, id, writeMessage)
+        if id not in self.liveMessages:
+            # writeMessage failed; nothing is pending for this id.
+            self._addressValidation.pop(id, None)
+        return d
 
 
 class DNSProtocol(DNSMixin, protocol.Protocol):

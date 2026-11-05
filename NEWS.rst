@@ -3,6 +3,72 @@ http://twistedmatrix.com/trac/ticket/<number>
 
 .. towncrier release notes start
 
+Twisted 20.3.0.post3 (2026-11-05)
+================================
+
+ActiveState security release for Python 2.7. Every fix is backported from
+Twisted 23.10 to 26.10, except where marked.
+
+Web
+---
+
+- twisted.web.http.HTTPChannel no longer dispatches a pipelined request
+  before the previous one has finished, even when several arrive in one
+  read (CVE-2023-46137, GHSA-xc8x-vp79-p3wm), and buffers the bytes after a
+  request body before dispatching it (CVE-2024-41671, GHSA-c8m8-j448-xjx7).
+- twisted.web.util.redirectTo HTML-escapes the URL in its fallback body
+  (CVE-2024-41810, GHSA-cf56-g6w6-pqq2).
+- HTTPChannel rejects a NUL, bare CR or bare LF in a header name or value with
+  a 400 (CVE-2026-115877, GHSA-q7qq-6mhp-9rc4).
+- The HTTP/2 server rate-limits peer stream resets and sends GOAWAY when
+  flooded (GHSA-vpp8-g58w-m8mp). It also stops handling the rest of a read once
+  the connection is torn down (ActiveState addition).
+
+Names
+-----
+
+- Message decoding follows at most 1000 compression pointers per message
+  (Message.maxCompressionPointers) and raises DNSDecodeError past that
+  (CVE-2026-42304, GHSA-grgv-6hw6-v9g4).
+- DNSDatagramProtocol accepts a response only from the address the query was
+  sent to (CVE-2026-83813, GHSA-jj36-9pvh-vj5r). IPv6 addresses are compared
+  in canonical form (ActiveState addition).
+
+Mail
+----
+
+- The IMAP4 parser rejects negative literal sizes (CVE-2026-115774,
+  GHSA-2qrf-pqgx-qh9v).
+- wildcardToRegexp escapes everything but the IMAP wildcards, and the IMAP4
+  server matches LIST/LSUB patterns in linear time (CVE-2026-106454,
+  GHSA-8pqf-f4m5-798g; the linear matcher is an ActiveState addition).
+  The object wildcardToRegexp returns now runs that linear check in
+  match() before using the regular expression, so other callers are
+  protected too (ActiveState addition).
+
+Words
+-----
+
+- domish drops a stream whose stanza exceeds 10 MiB or 100,000 elements
+  (CVE-2026-115775, GHSA-3476-c5c2-fr73).
+- The IRC server drops a client that sends a line over 16384 characters
+  (CVE-2026-115776, GHSA-53xc-49m8-p798).
+
+Core
+----
+
+- twisted.protocols.ftp.FTPClient opens passive-mode data connections to the
+  control connection's peer address instead of the host in the PASV reply;
+  pass trustPasvAddr=True for the old behaviour (twisted #12847, released in
+  26.10.0; no advisory).
+
+Conch
+-----
+
+- The Telnet transport drops a peer whose subnegotiation exceeds 4096 bytes
+  (CVE-2026-115778, GHSA-cwm5-jh59-mwxr).
+
+
 Twisted 20.3.0.1 (2023-08-17)
 ===========================
 

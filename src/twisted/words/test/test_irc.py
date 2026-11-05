@@ -1663,6 +1663,53 @@ class BasicServerFunctionalityTests(IRCTestCase):
         self.assertEqual(bufferValue, s)
 
 
+    def test_dataReceivedBoundsUnterminatedLine(self):
+        """
+        A line longer than L{irc.IRC.MAX_LENGTH} that arrives without a
+        delimiter is not buffered without bound.  The buffer is cleared and
+        the connection is dropped, matching
+        L{twisted.protocols.basic.LineReceiver}.
+        """
+        self.p.dataReceived(b"A" * (self.p.MAX_LENGTH + 1))
+        self.assertEqual(self.p.buffer, "")
+        self.assertTrue(self.t.closed)
+
+
+    def test_dataReceivedBoundsUnterminatedLineInChunks(self):
+        """
+        The limit applies to the accumulated buffer, so an unterminated line
+        delivered in many small chunks is also cut off.
+        """
+        chunk = b"A" * 1024
+        for _ in range(self.p.MAX_LENGTH // len(chunk)):
+            self.p.dataReceived(chunk)
+        self.assertFalse(self.t.closed)
+        self.p.dataReceived(b"A")
+        self.assertEqual(self.p.buffer, "")
+        self.assertTrue(self.t.closed)
+
+
+    def test_dataReceivedDropsOverlongTerminatedLine(self):
+        """
+        A delimited line longer than L{irc.IRC.MAX_LENGTH} is dropped rather
+        than dispatched.
+        """
+        self.p.dataReceived(b"A" * (self.p.MAX_LENGTH + 1) + b"\n")
+        self.assertEqual(self.p.buffer, "")
+        self.assertTrue(self.t.closed)
+
+
+    def test_dataReceivedAcceptsBoundedInput(self):
+        """
+        Input under the length limit is buffered normally and the connection
+        is left open.
+        """
+        self.p.dataReceived(b"\r\n")
+        self.p.dataReceived(b"AB")
+        self.assertEqual(self.p.buffer, "AB")
+        self.assertFalse(self.t.closed)
+
+
     def test_sendMessage(self):
         """
         Passing a command and parameters to L{IRC.sendMessage} results in a

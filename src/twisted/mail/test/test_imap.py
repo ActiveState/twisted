@@ -12,6 +12,7 @@ import codecs
 import functools
 import locale
 import os
+import re
 from io import BytesIO
 import uuid
 
@@ -829,6 +830,91 @@ class IMAP4HelperTests(unittest.TestCase):
                 self.assertTrue(wildcard.match(x))
 
 
+    def test_wildcardRegexSyntaxIsLiteral(self):
+        """
+        Regular expression syntax in a wildcard pattern is matched literally
+        rather than being interpreted, so a client cannot submit a
+        catastrophically backtracking expression such as C{(a+)+z}.
+        """
+        for delim in ('/', None):
+            pattern = imap4.wildcardToRegexp('(a+)+z', delim)
+            self.assertIsNone(pattern.match('a' * 20))
+            self.assertTrue(pattern.match('(a+)+z'))
+            self.assertTrue(pattern.match('(A+)+Z'))
+            dot = imap4.wildcardToRegexp('a.c*', delim)
+            self.assertTrue(dot.match('a.cxyz'))
+            self.assertIsNone(dot.match('abc'))
+            for special in '\\[](){}^$|?+.':
+                self.assertTrue(
+                    imap4.wildcardToRegexp(special, delim).match(special))
+
+
+    def test_wildcardPatternMatchesRegexp(self):
+        """
+        L{imap4._WildcardPattern} gives the same answers as the regular
+        expression built by L{imap4.wildcardToRegexp}.
+        """
+        wildcards = ['foo/%gum/bar', 'foo/x%x/bar', 'foo/xyz*abc/bar', '*',
+                     '%', '', 'INBOX', 'inbox/*', '*%*', '%%/%', 'a.c*',
+                     '(a+)+z', '*/', '%/']
+        names = ['foo/bar', 'oo/lalagum/bar', 'foo/gumx/bar', 'foo/gum/baz',
+                 'foo/xgum/bar', 'foo/gum/bar', 'foo/x/gum/bar', 'foo/xx/bar',
+                 'foo/xyzabc/bar', 'foo/xyz/123/abc/bar', 'INBOX',
+                 'inbox/sub', 'a.cd', 'abcd', '(a+)+z', '', '/', 'x/y']
+        for delim in ('/', None):
+            for wildcard in wildcards:
+                # Compare against the raw compiled expression, not the
+                # guarded wrapper, which consults the pattern itself.
+                regexp = imap4.wildcardToRegexp(wildcard, delim)._regexp
+                pattern = imap4._WildcardPattern(wildcard, delim)
+                for name in names:
+                    self.assertEqual(
+                        bool(regexp.match(name)), bool(pattern.match(name)),
+                        (wildcard, delim, name))
+
+
+    def test_wildcardPatternLinear(self):
+        """
+        L{imap4._WildcardPattern} does not backtrack: a pattern with many
+        wildcards against a long mailbox name that it does not match is
+        answered immediately.
+        """
+        pattern = imap4._WildcardPattern('*A' * 50 + 'B', '/')
+        self.assertIsNone(pattern.match('A' * 10000))
+        account = imap4.MemoryAccount('testuser')
+        account.addMailbox('A' * 2000, object())
+        self.assertEqual(account.listMailboxes('', '*A*A*A*A*A*A*A*A*B'), [])
+
+
+    def test_wildcardToRegexpLinearOnMismatch(self):
+        """
+        L{imap4.wildcardToRegexp} returns an expression whose C{match()} does
+        not backtrack catastrophically on a name that does not match, so
+        third-party callers are protected as well as the IMAP server.  On a
+        match it returns a real match object.
+        """
+        regexp = imap4.wildcardToRegexp('*a*a*a*a*a*b', None)
+        self.assertIsNone(regexp.match('a' * 5000))
+        match = regexp.match('a' * 5000 + 'b')
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(0), 'a' * 5000 + 'b')
+        regexp = imap4.wildcardToRegexp('%a%a%a%a%a%b', '/')
+        self.assertIsNone(regexp.match('a' * 5000))
+        self.assertIsNone(regexp.match('a/aaaaab'))
+
+
+    def test_wildcardToRegexpCompiledAttributes(self):
+        """
+        The object returned by L{imap4.wildcardToRegexp} exposes the compiled
+        expression's attributes, and C{match()} accepts C{pos}.
+        """
+        regexp = imap4.wildcardToRegexp('in*', None)
+        self.assertEqual(regexp.pattern, 'in(?:.*?)')
+        self.assertTrue(regexp.flags & re.I)
+        self.assertIsNotNone(regexp.search('xx-INBOX'))
+        self.assertIsNotNone(regexp.match('xxinbox', 2))
+
+
     def test_wildcardNoDelim(self):
         cases = [
             ['foo/%gum/bar',
@@ -1328,6 +1414,18 @@ class IMAP4HelperTests(unittest.TestCase):
 
         for (case, expected) in cases:
             self.assertEqual(imap4.parseNestedParens(case), expected)
+
+
+    def test_literalNegativeSize(self):
+        """
+        A literal with a negative octet count is rejected with L{ValueError}
+        instead of driving the parser into a non-terminating loop.
+        """
+        self.assertRaises(ValueError, imap4.parseNestedParens, b"{-1}", 1)
+        self.assertRaises(
+            ValueError, imap4.parseNestedParens, b"foo {-100}bar", 1)
+        self.assertRaises(
+            ValueError, imap4.parseNestedParens, b"{-100}zzzzzzzzzz", 1)
 
 
     def test_queryBuilder(self):
@@ -2635,6 +2733,42 @@ class IMAP4ServerTests(IMAP4HelperMixin, unittest.TestCase):
         d.addCallback(self.assertListDelimiterAndMailboxAreStrings)
         d.addCallback(self.assertEqual,
                       [(SimpleMailbox.flags, "/", "ROOT/SUBTHING")])
+        return d
+
+
+    def test_LSubNoRegex(self):
+        """
+        LSUB commands should use IMAP wildcards, and not be treated as Python
+        regexes.
+        """
+        # Subscribe to existing mailbox.
+        SimpleServer.theAccount.subscribe('ROOT/SUBTHING')
+
+        for newMailbox in [
+            # Verify that dot is treated literally.
+            'ROOT/.SUBMATCH',
+            # And can match nested things, since we're testing *.
+            'ROOT/.DEEP/MATCH',
+            # But only at the start of the match.
+            'ROOT/DEEP/.MATCH',
+        ]:
+            SimpleServer.theAccount.addMailbox(newMailbox)
+            SimpleServer.theAccount.subscribe(newMailbox)
+
+        def lsub():
+            return self.client.lsub('root', 'root/.*')
+
+        d = self._listSetup(lsub)
+        d.addCallback(self.assertListDelimiterAndMailboxAreStrings)
+        # Mailbox order follows dict iteration order, which is arbitrary on
+        # Python 2, so compare sorted.
+        d.addCallback(sorted)
+        d.addCallback(
+            self.assertEqual,
+            sorted([
+                (SimpleMailbox.flags, "/", "ROOT/.SUBMATCH"),
+                (SimpleMailbox.flags, "/", "ROOT/.DEEP/MATCH"),
+            ]))
         return d
 
 
@@ -7656,6 +7790,33 @@ class IMAP4ServerFetchTests(unittest.TestCase):
         expected = b"0001 BAD Illegal syntax: Invalid Argument\r\n"
         self.assertEqual(self.transport.value(), expected)
         self.transport.clear()
+        self.server.connectionLost(error.ConnectionDone("Connection closed"))
+
+
+
+class IMAP4ServerNegativeLiteralTests(unittest.TestCase):
+    """
+    A SEARCH whose search keys contain a literal with a negative octet count
+    is rejected instead of hanging the reactor.
+    """
+
+    def setUp(self):
+        self.transport = StringTransport()
+        self.server = imap4.IMAP4Server()
+        self.server.state = 'select'
+        self.server.makeConnection(self.transport)
+        self.transport.clear()
+
+
+    def test_searchNegativeLiteral(self):
+        """
+        C{SEARCH {-100}...} gets a C{BAD} response.
+        """
+        self.server.dataReceived(b"0001 SEARCH {-100}zzzzzzzzzz\r\n")
+        self.assertEqual(
+            self.transport.value(),
+            b"0001 BAD Server error: Illegal literal size\r\n")
+        self.assertEqual(len(self.flushLoggedErrors(ValueError)), 1)
         self.server.connectionLost(error.ConnectionDone("Connection closed"))
 
 

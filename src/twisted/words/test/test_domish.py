@@ -404,6 +404,91 @@ class DomishStreamTestsMixin:
         self.assertEqual({}, self.elements[1].localPrefixes)
 
 
+    def _assertParserError(self, message, data):
+        """
+        Assert that parsing C{data} raises L{domish.ParserError} whose message
+        contains C{message}.
+        """
+        exc = self.assertRaises(domish.ParserError, self.stream.parse, data)
+        self.assertIn(message, str(exc))
+
+
+    def test_elementCountLimit(self):
+        """
+        An unfinished stanza containing more than C{maxElementCount} elements
+        is rejected with L{domish.ParserError}, bounding the number of
+        elements a single stanza can accumulate.
+        """
+        self.stream.maxElementCount = 100
+        self.stream.parse(b"<stream><container>")
+        self._assertParserError("Maximum element count", b"<child/>" * 200)
+
+
+    def test_stanzaSizeLimit(self):
+        """
+        A single stanza whose accumulated byte size exceeds C{maxStanzaSize}
+        while it is still open is rejected before it completes.
+        """
+        self.stream.maxStanzaSize = 1024
+        self.stream.parse(b"<stream>")
+        self.stream.parse(b"<message>")
+        chunk = b"<body>" + b"x" * 256 + b"</body>"
+        for _ in range(3):
+            self.stream.parse(chunk)
+        self._assertParserError("Maximum stanza size", chunk)
+
+
+    def test_stanzaSizeCountsAttributeValues(self):
+        """
+        Bytes carried in an attribute value count toward C{maxStanzaSize}.
+        """
+        self.stream.maxStanzaSize = 1024
+        self.stream.parse(b"<stream>")
+        self.stream.parse(b"<message>")
+        self._assertParserError(
+            "Maximum stanza size", b"<x foo='" + b"A" * 4096 + b"'/>")
+
+
+    def test_stanzaSizeExactBoundary(self):
+        """
+        A stanza whose accumulated raw size is exactly C{maxStanzaSize} is
+        accepted; one byte beyond is rejected.
+        """
+        root = b"<stream>"
+        self.stream.parse(root)
+        openTag = b"<message>"
+        padding = 100
+        self.stream.maxStanzaSize = len(root) + len(openTag) + padding
+        self.stream.parse(openTag + b"x" * padding)
+        self._assertParserError("Maximum stanza size", b"x")
+
+
+    def test_elementCountExactBoundary(self):
+        """
+        Exactly C{maxElementCount} elements are accepted; one more is
+        rejected.
+        """
+        self.stream.maxElementCount = 100
+        self.stream.parse(b"<stream><container>")  # container is element 1
+        for _ in range(99):  # elements 2..100
+            self.stream.parse(b"<a/>")
+        self._assertParserError("Maximum element count", b"<a/>")
+
+
+    def test_sizeLimitsResetPerStanza(self):
+        """
+        The size and element counters reset when each top-level stanza is
+        emitted, so a long sequence of small stanzas whose combined size and
+        element count far exceed the limits is delivered without error.
+        """
+        self.stream.maxStanzaSize = 1024
+        self.stream.maxElementCount = 100
+        self.stream.parse(b"<stream>")
+        for _ in range(200):
+            self.stream.parse(b"<message><body>hi</body></message>")
+        self.assertEqual(len(self.elements), 200)
+
+
 
 class DomishExpatStreamTests(DomishStreamTestsMixin, unittest.TestCase):
     """

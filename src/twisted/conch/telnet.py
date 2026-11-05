@@ -15,6 +15,7 @@ import struct
 from zope.interface import implementer
 
 from twisted.internet import protocol, interfaces as iinternet, defer
+from twisted.logger import Logger
 from twisted.python import log
 from twisted.python.compat import _bytesChr as chr, iterbytes
 
@@ -397,10 +398,25 @@ class Telnet(protocol.Protocol):
     should not be made to it.
 
     @ivar transport: This protocol's transport object.
+
+    @cvar _MAX_SUBNEGOTIATION_LENGTH: The maximum number of bytes buffered for
+        a single subnegotiation, that is the subnegotiation command byte and
+        its payload between C{IAC SB} and C{IAC SE}.  Legitimate
+        subnegotiations carry small option parameters (terminal type, window
+        size, environment variables), so the default of 4096 is far larger
+        than any real subnegotiation while still bounding the memory a single
+        connection can consume.  A peer that sends more than this many bytes
+        without an C{IAC SE} terminator is treated as a protocol violation: a
+        warning is logged and the connection is dropped.  A subclass that
+        needs a different bound may override it.
     """
+
+    _log = Logger()
 
     # One of a lot of things
     state = 'data'
+
+    _MAX_SUBNEGOTIATION_LENGTH = 4096
 
     def __init__(self):
         self.options = {}
@@ -554,6 +570,24 @@ class Telnet(protocol.Protocol):
         self._write(IAC + SB + about + data + IAC + SE)
 
 
+    def _subnegotiationLengthExceeded(self):
+        """
+        Handle a subnegotiation that reaches L{_MAX_SUBNEGOTIATION_LENGTH}
+        without an C{IAC SE} terminator: log a warning and drop the
+        connection, mirroring
+        L{twisted.protocols.basic.LineReceiver.lineLengthExceeded}.  The
+        C{disconnecting} guard keeps this to a single log line if more
+        payload arrives while the connection is still closing.
+        """
+        if getattr(self.transport, 'disconnecting', False):
+            return
+        self._log.warn(
+            "Telnet subnegotiation exceeded {length} bytes without an "
+            "IAC SE terminator; dropping connection.",
+            length=self._MAX_SUBNEGOTIATION_LENGTH)
+        self.transport.loseConnection()
+
+
     def dataReceived(self, data):
         appDataBuffer = []
 
@@ -615,8 +649,13 @@ class Telnet(protocol.Protocol):
             elif self.state == 'subnegotiation':
                 if b == IAC:
                     self.state = 'subnegotiation-escaped'
-                else:
+                elif len(self.commands) < self._MAX_SUBNEGOTIATION_LENGTH:
                     self.commands.append(b)
+                else:
+                    # Stop parsing; the final flush below still delivers any
+                    # application data received before the violation.
+                    self._subnegotiationLengthExceeded()
+                    break
             elif self.state == 'subnegotiation-escaped':
                 if b == SE:
                     self.state = 'data'
@@ -628,7 +667,11 @@ class Telnet(protocol.Protocol):
                     self.negotiate(commands)
                 else:
                     self.state = 'subnegotiation'
-                    self.commands.append(b)
+                    if len(self.commands) < self._MAX_SUBNEGOTIATION_LENGTH:
+                        self.commands.append(b)
+                    else:
+                        self._subnegotiationLengthExceeded()
+                        break
             else:
                 raise ValueError("How'd you do this?")
 

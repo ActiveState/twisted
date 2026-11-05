@@ -19,6 +19,7 @@ from twisted.cred import portal, checkers, credentials
 from twisted.cred.error import UnauthorizedLogin
 from twisted.cred.portal import IRealm
 from twisted.internet import reactor, task, protocol, defer, error
+from twisted.internet.address import IPv4Address
 from twisted.internet.interfaces import IConsumer
 from twisted.protocols import basic
 from twisted.python import failure, filepath, runtime
@@ -1719,7 +1720,8 @@ class FTPClientTests(unittest.TestCase):
         Create a FTP client and connect it to fake transport.
         """
         self.client = ftp.FTPClient()
-        self.transport = proto_helpers.StringTransportWithDisconnection()
+        self.transport = proto_helpers.StringTransportWithDisconnection(
+            peerAddress=IPv4Address('TCP', '127.0.0.1', 21))
         self.client.makeConnection(self.transport)
         self.transport.protocol = self.client
 
@@ -1867,6 +1869,58 @@ class FTPClientTests(unittest.TestCase):
         self.assertEqual(self.transport.value(), b'CWD bar/foo\r\n')
         self.client.lineReceived(b'550 bar/foo: No such file or directory')
         return d
+
+
+    def _passiveRETRConnectsTo(self, expectedHost):
+        """
+        Retrieve a file in passive mode, with the server's PASV reply naming
+        127.0.0.2, and assert that the data connection goes to
+        C{expectedHost}.
+        """
+        def cbConnect(host, port, factory):
+            self.assertEqual(host, expectedHost)
+            self.assertEqual(port, 12345)
+            proto = factory.buildProtocol((host, port))
+            proto.makeConnection(proto_helpers.StringTransport())
+            self.client.lineReceived(
+                b'150 File status okay; about to open data connection.')
+            proto.connectionLost(failure.Failure(error.ConnectionDone("")))
+
+        self.client.connectFactory = cbConnect
+        self._testLogin()
+        d = self.client.retrieveFile("spam", _BufferingProtocol())
+        self.assertEqual(self.transport.value(), b'PASV\r\n')
+        self.transport.clear()
+        self.client.lineReceived(
+            passivemode_msg(self.client, host='127.0.0.2'))
+        self.assertEqual(self.transport.value(), b'RETR spam\r\n')
+        self.client.lineReceived(b'226 Transfer Complete.')
+        return d
+
+
+    def test_passiveRETRPeerCheck(self):
+        """
+        By default, the client opens passive data connections to the address
+        of the original server, not to the address in the PASV reply.
+        """
+        return self._passiveRETRConnectsTo('127.0.0.1')
+
+
+    def test_passiveRETRNoPeerCheck(self):
+        """
+        With C{trustPasvAddr=True}, the address in the PASV reply is used for
+        passive data connections.
+        """
+        self.client._trustPasvAddr = True
+        return self._passiveRETRConnectsTo('127.0.0.2')
+
+
+    def test_trustPasvAddrConstructorArgument(self):
+        """
+        C{trustPasvAddr} defaults to False and can be set on construction.
+        """
+        self.assertFalse(ftp.FTPClient()._trustPasvAddr)
+        self.assertTrue(ftp.FTPClient(trustPasvAddr=True)._trustPasvAddr)
 
 
     def test_passiveRETR(self):

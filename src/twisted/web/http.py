@@ -2330,8 +2330,13 @@ class HTTPChannel(basic.LineReceiver, policies.TimeoutMixin):
 
 
     def _finishRequestBody(self, data):
-        self.allContentReceived()
+        # Buffer any bytes following the request body *before* dispatching the
+        # request: a request that finishes synchronously inside
+        # allContentReceived replays self._dataBuffer from requestDone, and
+        # data appended afterwards would be left behind and processed out of
+        # order (CVE-2024-41671, GHSA-c8m8-j448-xjx7).
         self._dataBuffer.append(data)
+        self.allContentReceived()
 
     def _maybeChooseTransferDecoder(self, header, data):
         """
@@ -2403,8 +2408,21 @@ class HTTPChannel(basic.LineReceiver, policies.TimeoutMixin):
             self._respondToBadRequestAndDisconnect()
             return False
 
+        # A header name or value must not contain NUL, CR, or LF (RFC 9110
+        # section 5.5). The channel splits lines only on CRLF, so a bare CR or
+        # LF here would let a lenient proxy see a header that we do not
+        # (CVE-2026-115877, GHSA-q7qq-6mhp-9rc4). This version does not
+        # require header names to be tokens, so check the name as well.
+        if len(header.translate(None, b"\x00\r\n")) != len(header):
+            self._respondToBadRequestAndDisconnect()
+            return False
+
         header = header.lower()
         data = data.strip(b" \t")
+
+        if len(data.translate(None, b"\x00\r\n")) != len(data):
+            self._respondToBadRequestAndDisconnect()
+            return False
 
         if not self._maybeChooseTransferDecoder(header, data):
             return False
@@ -2444,15 +2462,39 @@ class HTTPChannel(basic.LineReceiver, policies.TimeoutMixin):
 
         self._handlingRequest = True
 
+        # We go into raw mode here even though we will be receiving lines next
+        # in the protocol; however, this data will be buffered and then passed
+        # back to line mode in the setLineMode call in requestDone.
+        self.setRawMode()
+
         req = self.requests[-1]
         req.requestReceived(command, path, version)
 
 
-    def dataReceived(self, data):
+    def rawDataReceived(self, data):
         """
-        Data was received from the network.  Process it.
+        This is called when this HTTP/1.1 parser is in raw mode rather than
+        line mode.
+
+        It may be in raw mode for one of two reasons:
+
+            1. All the headers of a request have been received and this
+               L{HTTPChannel} is currently receiving its body.
+
+            2. The full content of a request has been received and is currently
+               being processed asynchronously, and this L{HTTPChannel} is
+               buffering the data of all subsequent requests to be parsed
+               later.
+
+        In the second state, the data will be played back later.
+
+        @note: This isn't really a public API, and should be invoked only by
+            L{LineReceiver}'s line parsing logic.  If you wish to drive an
+            L{HTTPChannel} from a custom data source, call C{dataReceived} on
+            it directly.
+
+        @see: L{LineReceiver.rawDataReceived}
         """
-        # If we're currently handling a request, buffer this data.
         if self._handlingRequest:
             self._dataBuffer.append(data)
             if (
@@ -2466,10 +2508,7 @@ class HTTPChannel(basic.LineReceiver, policies.TimeoutMixin):
                 # ready.  See docstring for _optimisticEagerReadSize above.
                 self._networkProducer.pauseProducing()
             return
-        return basic.LineReceiver.dataReceived(self, data)
 
-
-    def rawDataReceived(self, data):
         self.resetTimeout()
 
         try:

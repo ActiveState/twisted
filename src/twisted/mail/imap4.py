@@ -4765,13 +4765,157 @@ def Not(query):
 
 
 def wildcardToRegexp(wildcard, delim=None):
-    wildcard = wildcard.replace('*', '(?:.*?)')
-    if delim is None:
-        wildcard = wildcard.replace('%', '(?:.*?)')
-    else:
-        wildcard = wildcard.replace('%', '(?:(?:[^%s])*?)' % re.escape(delim))
-    return re.compile(wildcard, re.I)
+    """
+    Convert what the IMAP describes as a "mailbox name with possible
+    wildcards" into a regular expression that will match a full mailbox name.
 
+    @param wildcard: the mailbox name matching expression which may contain
+        IMAP wildcards, e.g. C{*} and C{%}.  Note that this is I{not} treated
+        as a regular expression itself, and any regex syntax will be matched
+        literally.
+
+    @param delim: the delimiter between IMAP path elements, if any.  Note
+        that this is always C{"/"} when used by Twisted's IMAP server.
+
+    @return: an object that behaves like a compiled regular expression that
+        will match IMAP mailbox names with the given wildcards.  Its
+        C{match()} runs a linear-time pre-check (L{_WildcardPattern}) and only
+        consults the regular expression when the name matches, so a hostile
+        pattern such as C{*a*a*a*a*a*b} cannot backtrack catastrophically on a
+        non-matching name.  Other methods (C{search}, C{pattern}, ...) are
+        those of the underlying compiled expression.
+    """
+    # Split on the two IMAP wildcards, escape everything else.
+    result = []
+    for part in re.split(r'([*%])', wildcard):
+        if part == '*':
+            result.append('(?:.*?)')
+        elif part == '%':
+            if delim is None:
+                result.append('(?:.*?)')
+            else:
+                result.append('(?:(?:[^%s])*?)' % (re.escape(delim),))
+        else:
+            result.append(re.escape(part))
+    return _GuardedWildcardRegexp(re.compile(''.join(result), re.I),
+                                  _WildcardPattern(wildcard, delim))
+
+
+
+class _GuardedWildcardRegexp(object):
+    """
+    The return value of L{wildcardToRegexp}: a compiled regular expression
+    whose C{match()} is guarded by a linear-time L{_WildcardPattern}.
+
+    Even with the wildcards escaped, the generated expression backtracks
+    super-linearly on a name that does not match (C{*a*a*a*a*a*b} against
+    150 C{a}s takes minutes).  L{_WildcardPattern} gives the same yes/no
+    answer in linear time, so the expression only runs on names that match,
+    where it finds the match at once and returns the usual match object.
+
+    Attribute access other than C{match} goes to the compiled expression.
+    """
+
+    def __init__(self, regexp, matcher):
+        self._regexp = regexp
+        self._matcher = matcher
+
+
+    def match(self, string, *args, **kwargs):
+        """
+        Like C{re.match}, but return L{None} at once, in linear time, when
+        the linear matcher rules out a match.  Calls with C{pos}/C{endpos}
+        go straight to the compiled expression.
+        """
+        if not args and not kwargs and not self._matcher.match(string):
+            return None
+        return self._regexp.match(string, *args, **kwargs)
+
+
+    def __getattr__(self, name):
+        return getattr(self._regexp, name)
+
+
+
+class _WildcardPattern(object):
+    """
+    Match mailbox names against an IMAP C{LIST}/C{LSUB} pattern.
+
+    This gives the same answer as
+    C{wildcardToRegexp(wildcard, delim).match(name)} (a case-insensitive
+    match of the pattern against a prefix of C{name}) but runs a bit-parallel
+    NFA instead of a backtracking regular expression, so its cost is linear
+    in C{len(name)} whatever the pattern: a client cannot stall the reactor
+    with a pattern such as C{*a*a*a*a*a*b} against a long mailbox name.
+
+    @ivar pattern: The original wildcard string.
+    """
+
+    def __init__(self, wildcard, delim=None):
+        self.pattern = wildcard
+        self._delim = delim.lower() if delim is not None else None
+        # Collapse runs of wildcards: "**", "*%" and "%*" match the same
+        # strings as "*", and "%%" the same strings as "%".  Afterwards no
+        # two wildcard tokens are adjacent, which keeps the epsilon closure
+        # below to a single step.
+        tokens = []
+        for c in wildcard.lower():
+            if c in ('*', '%'):
+                if tokens and tokens[-1] in ('*', '%'):
+                    if c == '*' or tokens[-1] == '*':
+                        tokens[-1] = '*'
+                    continue
+                tokens.append(c)
+            else:
+                tokens.append((c,))
+        self._accept = 1 << len(tokens)
+        self._literal = {}
+        self._any = 0
+        self._noDelim = 0
+        for i, token in enumerate(tokens):
+            if token == '*':
+                self._any |= 1 << i
+            elif token == '%':
+                if delim is None:
+                    self._any |= 1 << i
+                else:
+                    self._noDelim |= 1 << i
+            else:
+                c = token[0]
+                self._literal[c] = self._literal.get(c, 0) | (1 << i)
+        self._wild = self._any | self._noDelim
+
+
+    def match(self, name):
+        """
+        @param name: A mailbox name.
+
+        @return: C{True} if a prefix of C{name} matches the pattern,
+            otherwise L{None}.
+        """
+        wild = self._wild
+        anyLoop = self._any
+        bothLoop = self._any | self._noDelim
+        literal = self._literal
+        accept = self._accept
+        delim = self._delim
+        # Bit i set: the first i tokens have been matched.
+        state = 1
+        state |= (state & wild) << 1
+        if state & accept:
+            return True
+        for c in name.lower():
+            if c == delim:
+                loop = anyLoop
+            else:
+                loop = bothLoop
+            state = ((state & literal.get(c, 0)) << 1) | (state & loop)
+            if not state:
+                return None
+            state |= (state & wild) << 1
+            if state & accept:
+                return True
+        return None
 
 
 def splitQuoted(s):
@@ -4931,6 +5075,8 @@ def parseNestedParens(s, handleLiteral = 1):
                     if end == -1:
                         raise ValueError("Malformed literal")
                     literalSize = int(s[i+1:end])
+                    if literalSize < 0:
+                        raise ValueError("Illegal literal size")
                     contentStack[-1].append((s[end+3:end+3+literalSize],))
                     i = end + 3 + literalSize
                 elif c == b'(' or c == b'[':
@@ -5189,7 +5335,7 @@ class MemoryAccountWithoutNamespaces(object):
 
     def listMailboxes(self, ref, wildcard):
         ref = self._inferiorNames(_parseMbox(ref.upper()))
-        wildcard = wildcardToRegexp(wildcard, '/')
+        wildcard = _WildcardPattern(wildcard, '/')
         return [(i, self.mailboxes[i]) for i in ref if wildcard.match(i)]
 
 
