@@ -42,6 +42,9 @@ Mail
 - wildcardToRegexp escapes everything but the IMAP wildcards, and the IMAP4
   server matches LIST/LSUB patterns in linear time (CVE-2026-106454,
   GHSA-8pqf-f4m5-798g; the linear matcher is an ActiveState addition).
+  The object wildcardToRegexp returns now runs that linear check in
+  match() before using the regular expression, so other callers are
+  protected too (ActiveState addition).
 
 Words
 -----
@@ -50,6 +53,14 @@ Words
   (CVE-2026-115775, GHSA-3476-c5c2-fr73).
 - The IRC server drops a client that sends a line over 16384 characters
   (CVE-2026-115776, GHSA-53xc-49m8-p798).
+
+Core
+----
+
+- twisted.protocols.ftp.FTPClient opens passive-mode data connections to the
+  control connection's peer address instead of the host in the PASV reply;
+  pass trustPasvAddr=True for the old behaviour (twisted #12847, released in
+  26.10.0; no advisory).
 
 Conch
 -----
