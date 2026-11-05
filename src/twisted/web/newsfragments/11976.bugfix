@@ -1,0 +1,1 @@
+twisted.web.http.HTTPChannel no longer dispatches a pipelined HTTP/1.1 request to application code before the previous request on the same connection has finished, even when several requests arrive in one TCP segment, which could produce out-of-order responses (CVE-2023-46137, GHSA-xc8x-vp79-p3wm).

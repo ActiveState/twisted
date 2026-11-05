@@ -13,7 +13,7 @@ from zope.interface import implementer
 from zope.interface.verify import verifyObject
 
 from twisted.python import reflect, failure
-from twisted.python.compat import unichr
+from twisted.python.compat import iterbytes, unichr
 from twisted.python.filepath import FilePath
 from twisted.trial import unittest
 from twisted.internet import reactor, interfaces
@@ -25,7 +25,7 @@ from twisted.web import iweb, http, error
 from twisted.web.test.requesthelper import DummyChannel, DummyRequest
 from twisted.web.static import Data
 from twisted.logger import globalLogPublisher, LogLevel
-from twisted.test.proto_helpers import EventLoggingObserver
+from twisted.test.proto_helpers import EventLoggingObserver, StringTransport
 
 from ._util import (
     assertIsFilesystemTemporary,
@@ -1890,3 +1890,83 @@ class ExplicitHTTPFactoryReactor(unittest.TestCase):
         from twisted.internet import reactor
         factory = http.HTTPFactory()
         self.assertIs(factory._reactor, reactor)
+
+
+
+class QueueResource(resource.Resource):
+    """
+    Add all requests to an internal queue,
+    without responding to the requests.
+    You can access the requests from the queue and handle their response.
+    """
+    isLeaf = True
+
+    def __init__(self):
+        resource.Resource.__init__(self)
+        self.dispatchedRequests = []
+
+
+    def render_GET(self, request):
+        self.dispatchedRequests.append(request)
+        return server.NOT_DONE_YET
+
+
+
+class TestRFC9112Section932(unittest.TestCase):
+    """
+    Verify that HTTP/1.1 request ordering is preserved.
+
+    See CVE-2023-46137 / GHSA-xc8x-vp79-p3wm.
+    """
+
+    def test_multipleRequestsInOneSegment(self):
+        """
+        Twisted MUST NOT respond to a second HTTP/1.1 request while the first
+        is still pending.
+        """
+        qr = QueueResource()
+        site = server.Site(qr)
+        proto = site.buildProtocol(None)
+        serverTransport = StringTransport()
+        proto.makeConnection(serverTransport)
+        proto.dataReceived(
+            b"GET /first HTTP/1.1\r\nHost: a\r\n\r\n"
+            b"GET /second HTTP/1.1\r\nHost: a\r\n\r\n"
+        )
+        # The TCP data contains 2 requests,
+        # but only 1 request was dispatched,
+        # as the first request was not yet finalized.
+        self.assertEqual(len(qr.dispatchedRequests), 1)
+        # The first request is finalized and the
+        # second request is dispatched right away.
+        qr.dispatchedRequests[0].finish()
+        self.assertEqual(len(qr.dispatchedRequests), 2)
+
+
+    def test_multipleRequestsInDifferentSegments(self):
+        """
+        Twisted MUST NOT respond to a second HTTP/1.1 request while the first
+        is still pending, even if the second request is received in a separate
+        TCP package.
+        """
+        qr = QueueResource()
+        site = server.Site(qr)
+        proto = site.buildProtocol(None)
+        serverTransport = StringTransport()
+        proto.makeConnection(serverTransport)
+        raw_data = (
+            b"GET /first HTTP/1.1\r\nHost: a\r\n\r\n"
+            b"GET /second HTTP/1.1\r\nHost: a\r\n\r\n"
+        )
+        # Just go byte by byte for the extreme case in which each byte is
+        # received in a separate TCP package.
+        for chunk in iterbytes(raw_data):
+            proto.dataReceived(chunk)
+        # The TCP data contains 2 requests,
+        # but only 1 request was dispatched,
+        # as the first request was not yet finalized.
+        self.assertEqual(len(qr.dispatchedRequests), 1)
+        # The first request is finalized and the
+        # second request is dispatched right away.
+        qr.dispatchedRequests[0].finish()
+        self.assertEqual(len(qr.dispatchedRequests), 2)
