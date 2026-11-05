@@ -1330,6 +1330,18 @@ class IMAP4HelperTests(unittest.TestCase):
             self.assertEqual(imap4.parseNestedParens(case), expected)
 
 
+    def test_literalNegativeSize(self):
+        """
+        A literal with a negative octet count is rejected with L{ValueError}
+        instead of driving the parser into a non-terminating loop.
+        """
+        self.assertRaises(ValueError, imap4.parseNestedParens, b"{-1}", 1)
+        self.assertRaises(
+            ValueError, imap4.parseNestedParens, b"foo {-100}bar", 1)
+        self.assertRaises(
+            ValueError, imap4.parseNestedParens, b"{-100}zzzzzzzzzz", 1)
+
+
     def test_queryBuilder(self):
         inputs = [
             imap4.Query(flagged=1),
@@ -7656,6 +7668,33 @@ class IMAP4ServerFetchTests(unittest.TestCase):
         expected = b"0001 BAD Illegal syntax: Invalid Argument\r\n"
         self.assertEqual(self.transport.value(), expected)
         self.transport.clear()
+        self.server.connectionLost(error.ConnectionDone("Connection closed"))
+
+
+
+class IMAP4ServerNegativeLiteralTests(unittest.TestCase):
+    """
+    A SEARCH whose search keys contain a literal with a negative octet count
+    is rejected instead of hanging the reactor.
+    """
+
+    def setUp(self):
+        self.transport = StringTransport()
+        self.server = imap4.IMAP4Server()
+        self.server.state = 'select'
+        self.server.makeConnection(self.transport)
+        self.transport.clear()
+
+
+    def test_searchNegativeLiteral(self):
+        """
+        C{SEARCH {-100}...} gets a C{BAD} response.
+        """
+        self.server.dataReceived(b"0001 SEARCH {-100}zzzzzzzzzz\r\n")
+        self.assertEqual(
+            self.transport.value(),
+            b"0001 BAD Server error: Illegal literal size\r\n")
+        self.assertEqual(len(self.flushLoggedErrors(ValueError)), 1)
         self.server.connectionLost(error.ConnectionDone("Connection closed"))
 
 
