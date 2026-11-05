@@ -829,6 +829,25 @@ class IMAP4HelperTests(unittest.TestCase):
                 self.assertTrue(wildcard.match(x))
 
 
+    def test_wildcardRegexSyntaxIsLiteral(self):
+        """
+        Regular expression syntax in a wildcard pattern is matched literally
+        rather than being interpreted, so a client cannot submit a
+        catastrophically backtracking expression such as C{(a+)+z}.
+        """
+        for delim in ('/', None):
+            pattern = imap4.wildcardToRegexp('(a+)+z', delim)
+            self.assertIsNone(pattern.match('a' * 20))
+            self.assertTrue(pattern.match('(a+)+z'))
+            self.assertTrue(pattern.match('(A+)+Z'))
+            dot = imap4.wildcardToRegexp('a.c*', delim)
+            self.assertTrue(dot.match('a.cxyz'))
+            self.assertIsNone(dot.match('abc'))
+            for special in '\\[](){}^$|?+.':
+                self.assertTrue(
+                    imap4.wildcardToRegexp(special, delim).match(special))
+
+
     def test_wildcardNoDelim(self):
         cases = [
             ['foo/%gum/bar',
@@ -2647,6 +2666,42 @@ class IMAP4ServerTests(IMAP4HelperMixin, unittest.TestCase):
         d.addCallback(self.assertListDelimiterAndMailboxAreStrings)
         d.addCallback(self.assertEqual,
                       [(SimpleMailbox.flags, "/", "ROOT/SUBTHING")])
+        return d
+
+
+    def test_LSubNoRegex(self):
+        """
+        LSUB commands should use IMAP wildcards, and not be treated as Python
+        regexes.
+        """
+        # Subscribe to existing mailbox.
+        SimpleServer.theAccount.subscribe('ROOT/SUBTHING')
+
+        for newMailbox in [
+            # Verify that dot is treated literally.
+            'ROOT/.SUBMATCH',
+            # And can match nested things, since we're testing *.
+            'ROOT/.DEEP/MATCH',
+            # But only at the start of the match.
+            'ROOT/DEEP/.MATCH',
+        ]:
+            SimpleServer.theAccount.addMailbox(newMailbox)
+            SimpleServer.theAccount.subscribe(newMailbox)
+
+        def lsub():
+            return self.client.lsub('root', 'root/.*')
+
+        d = self._listSetup(lsub)
+        d.addCallback(self.assertListDelimiterAndMailboxAreStrings)
+        # Mailbox order follows dict iteration order, which is arbitrary on
+        # Python 2, so compare sorted.
+        d.addCallback(sorted)
+        d.addCallback(
+            self.assertEqual,
+            sorted([
+                (SimpleMailbox.flags, "/", "ROOT/.SUBMATCH"),
+                (SimpleMailbox.flags, "/", "ROOT/.DEEP/MATCH"),
+            ]))
         return d
 
 

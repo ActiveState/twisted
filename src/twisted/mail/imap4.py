@@ -4765,12 +4765,34 @@ def Not(query):
 
 
 def wildcardToRegexp(wildcard, delim=None):
-    wildcard = wildcard.replace('*', '(?:.*?)')
-    if delim is None:
-        wildcard = wildcard.replace('%', '(?:.*?)')
-    else:
-        wildcard = wildcard.replace('%', '(?:(?:[^%s])*?)' % re.escape(delim))
-    return re.compile(wildcard, re.I)
+    """
+    Convert what the IMAP describes as a "mailbox name with possible
+    wildcards" into a regular expression that will match a full mailbox name.
+
+    @param wildcard: the mailbox name matching expression which may contain
+        IMAP wildcards, e.g. C{*} and C{%}.  Note that this is I{not} treated
+        as a regular expression itself, and any regex syntax will be matched
+        literally.
+
+    @param delim: the delimiter between IMAP path elements, if any.  Note
+        that this is always C{"/"} when used by Twisted's IMAP server.
+
+    @return: a compiled regular expression that will match IMAP mailbox names
+        with the given wildcards.
+    """
+    # Split on the two IMAP wildcards, escape everything else.
+    result = []
+    for part in re.split(r'([*%])', wildcard):
+        if part == '*':
+            result.append('(?:.*?)')
+        elif part == '%':
+            if delim is None:
+                result.append('(?:.*?)')
+            else:
+                result.append('(?:(?:[^%s])*?)' % (re.escape(delim),))
+        else:
+            result.append(re.escape(part))
+    return re.compile(''.join(result), re.I)
 
 
 
